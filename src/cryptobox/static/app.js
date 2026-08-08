@@ -205,11 +205,14 @@ $("#initForm").addEventListener("submit", async (event) => {
     }});
     $("#initPassword").value = $("#initConfirmation").value = "";
     await refreshStatus();
-  } catch (error) { showError(error.message); }
+  } catch (error) {
+    if (/already initialized/i.test(error.message)) { await refreshStatus(); }
+    else showError(error.message);
+  }
 });
 
 $("#applyRoot").addEventListener("click", async () => {
-  try { await api("/api/root", { method: "PUT", body: { path: $("#rootPath").value } }); await loadPreview(); }
+  try { await api("/api/root", { method: "PUT", body: { path: $("#rootPath").value } }); await refreshStatus(); }
   catch (error) { showError(error.message); }
 });
 $("#rescanButton").addEventListener("click", async () => { try { await api("/api/rescan", { method: "POST" }); } catch (error) { toast(error.message); } });
@@ -232,4 +235,13 @@ $("#passwordButton").addEventListener("click", async () => {
   catch (error) { toast(error.message); }
 });
 
+async function loadVersion() {
+  try {
+    const info = await api("/api/version");
+    const node = $("#appVersion");
+    if (node && info.version) node.textContent = `Cryptobox v${info.version}`;
+  } catch (_) { /* version badge is best-effort */ }
+}
+
 refreshStatus();
+loadVersion();

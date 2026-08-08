@@ -16,6 +16,7 @@ import uvicorn
 from .api import create_app
 from .constants import APP_NAME, DEFAULT_PORT
 from .service import RuntimeState
+from . import __version__
 
 
 def configure_logging(level: str) -> None:
@@ -48,6 +49,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Loopback port")
     parser.add_argument("--no-open", action="store_true", help="Do not open the browser automatically")
     parser.add_argument("--log-level", default="info", choices=["debug", "info", "warning", "error"])
+    parser.add_argument("--version", action="version", version=f"cryptobox {__version__}")
     return parser.parse_args(argv)
 
 

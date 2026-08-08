@@ -22,6 +22,7 @@ from .crypto import iter_decrypted, read_header_path
 from .errors import CryptoboxError, InvalidPassword, UnsafePath
 from .scanner import iter_regular_files, preview_root
 from .service import RuntimeState
+from . import __version__
 from .util import (
     current_executable,
     display_name,
@@ -145,6 +146,10 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
             )
             return response
         return FileResponse(static_dir / "index.html")
+
+    @app.get("/api/version")
+    async def app_version() -> dict[str, str]:
+        return {"version": __version__}
 
     @app.get("/api/status", dependencies=[Depends(require_session)])
     async def status() -> dict[str, object]:

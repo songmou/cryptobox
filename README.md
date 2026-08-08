@@ -42,7 +42,7 @@ python3.13 -m venv .venv
 .venv/bin/pyinstaller --clean --noconfirm cryptobox.spec
 ```
 
-输出位于 `dist/cryptobox`。PyInstaller 不是交叉编译器，Windows、macOS、Linux 必须分别构建。
+输出位于 `dist/cryptobox-<版本>`（如 `dist/cryptobox-0.1.0`）。PyInstaller 不是交叉编译器，Windows、macOS、Linux 必须分别构建。
 
 ## 使用边界
 
@@ -52,3 +52,90 @@ python3.13 -m venv .venv
 - 符号链接不会被跟随；硬链接文件会报告错误并保持原状。
 
 文件格式见 [FORMAT.md](FORMAT.md)，故障处理见 [RECOVERY.md](RECOVERY.md)。
+
+## Windows 启动教程（从源码运行）
+
+要求 Python 3.11 以上（推荐 3.13）。以下操作在 PowerShell 中进行。
+
+1. 在项目根目录创建虚拟环境：
+   ```powershell
+   python -m venv .venv
+   ```
+   > 若系统 Python 缺少 `venv` 模块（部分精简 / 嵌入式安装会出现 `No module named venv`），请改用完整版 Python 3.13，或用其他软件自带的 managed Python：
+   > `"C:\Users\abc\python\versions\3.13.12\python.exe" -m venv .venv`
+
+2. 激活虚拟环境（PowerShell 的脚本是 `Activate.ps1`，不是 `activate`）：
+   ```powershell
+   & .\.venv\Scripts\Activate.ps1
+   ```
+   > 若被执行策略拦截，先运行：`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force`
+
+3. 安装项目（含开发依赖）：
+   ```powershell
+   pip install -e ".[dev]"
+   ```
+
+4. 启动（必须指定专用保险库目录，示例为 `D:\cryptofile`）：
+   ```powershell
+   cryptobox --root "D:\cryptofile"
+   ```
+   程序会自动打开浏览器访问一次性本机地址 `127.0.0.1`；`--no-open` 可关闭自动打开。
+
+> 不激活也可直接调用可执行入口：
+> `D:\cryptobox\.venv\Scripts\cryptobox.exe --root "D:\cryptofile"`
+
+首次使用在 Web 中确认目录并设置两次相同的密码，提交后开始初始化与加密；后续启动同样在 Web 中输入密码。
+
+## 编译（打包为独立可执行文件）
+
+使用 PyInstaller，配置见 `cryptobox.spec`：
+
+```powershell
+.venv\Scripts\pyinstaller --clean --noconfirm cryptobox.spec
+```
+
+输出位于 `dist\cryptobox-<版本>.exe`（如 `dist\cryptobox-0.1.0.exe`）（单文件模式，已内嵌 `src/cryptobox/static` 资源与 OpenSSL 等依赖），可直接在没有 Python 环境的 Windows 上运行：
+
+```powershell
+dist\cryptobox-0.1.0.exe --root "D:\cryptofile"
+```
+
+### Windows / macOS / Linux 编译差异
+
+- **同一份 `cryptobox.spec` 三平台通用**，spec 内部没有平台分支（入口统一为 `cryptobox_entry.py`，打包 `static` 资源，隐藏导入 `uvicorn` 子模块）。
+- **PyInstaller 不是交叉编译器**，必须在目标平台上各自构建一次：Windows 上产出 `.exe`，macOS / Linux 上产出同名终端可执行文件。无法在一台机器上打出另外两个平台的产品。
+- **Windows 产物为控制台程序**（`console=True`），运行时会保留一个命令行窗口用于日志输出。
+- **macOS / Linux 产物未经代码签名**（`codesign_identity=None`、`entitlements_file=None`）。macOS 上首次打开可能被 Gatekeeper 拦截，需要在「系统设置 → 隐私与安全性」中手动放行，或从终端运行。
+- 各平台分别构建后即可分发对应平台的独立可执行文件。
+
+## 一键脚本（启动与编译）
+
+项目在 `scripts/` 下提供了跨平台的一键脚本，已内置**平台守卫**：在错误的平台上运行会提示并退出，不会误执行。脚本会自动选择运行入口（优先 `dist/` 下的编译产物，其次 `.venv` 虚拟环境入口，最后回退到 `python -m cryptobox.main`）；编译脚本在缺少 `.venv` 时会自动创建并安装依赖。
+
+### 启动
+
+| 平台 | 脚本 | 在项目根目录执行的命令 |
+| --- | --- | --- |
+| Windows | `scripts/run-dev.ps1` | `powershell -ExecutionPolicy Bypass -File scripts\run-dev.ps1` |
+| macOS / Linux | `scripts/run-dev.sh` | `bash scripts/run-dev.sh` |
+
+- 第一个参数即保险库目录（`--root`）；不传则使用默认值（Windows 默认 `D:\Kaung\cryptofile`，macOS / Linux 默认 `~/cryptofile`，可在脚本顶部修改）。
+  ```powershell
+  # Windows，指定自定义保险库
+  powershell -ExecutionPolicy Bypass -File scripts\run-dev.ps1 "D:\my\vault"
+  ```
+  ```bash
+  # macOS / Linux，指定自定义保险库
+  bash scripts/run-dev.sh /path/to/vault
+  ```
+- 关于 iOS：本项目是**桌面**程序（仅绑定 `127.0.0.1` 的 Web 界面），iOS 不适用；在 macOS 上请使用 `scripts/run-dev.sh`。
+
+### 编译（打包为独立可执行文件）
+
+| 平台 | 脚本 | 在项目根目录执行的命令 |
+| --- | --- | --- |
+| Windows | `scripts/build.ps1` | `powershell -ExecutionPolicy Bypass -File scripts\build.ps1` |
+| macOS / Linux | `scripts/build.sh` | `bash scripts/build.sh` |
+
+- 产物：Windows 为 `dist\cryptobox-<版本>.exe`（如 `dist\cryptobox-0.1.0.exe`），macOS / Linux 为 `dist/cryptobox-<版本>`（如 `dist/cryptobox-0.1.0`）（单文件，已内嵌 `static` 资源与依赖），可直接在没有 Python 环境的同平台机器上运行。
+- 编译脚本同样带平台守卫：在 macOS / Linux 上误跑 `build.ps1`、或在 Windows 上误跑 `build.sh` 都会提示后退出。
