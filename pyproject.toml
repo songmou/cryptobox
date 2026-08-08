@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cryptobox-local"
+version = "0.1.0"
+description = "Local encrypted-file browser with a loopback-only web interface"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+  "cryptography>=49.0,<50",
+  "fastapi>=0.116,<1",
+  "uvicorn>=0.35,<1",
+  "watchdog>=6,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.28,<1",
+  "pyinstaller>=6.21,<7",
+  "pytest>=8.4,<9",
+  "pytest-cov>=6,<7",
+]
+
+[project.scripts]
+cryptobox = "cryptobox.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+cryptobox = ["static/*"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+

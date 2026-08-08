@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Cryptobox</title>
+    <link rel="stylesheet" href="/static/app.css">
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+    <main id="shell">
+      <header class="topbar">
+        <div class="brand"><span class="brand-mark">C</span><span>Cryptobox</span></div>
+        <div class="status-pill" id="vaultState"><i></i><span>正在连接</span></div>
+      </header>
+
+      <section id="accessView" class="access-card hidden">
+        <div class="eyebrow">LOCAL ENCRYPTED VAULT</div>
+        <h1 id="accessTitle">解锁你的文件</h1>
+        <p id="accessDescription">密码只用于本机解锁，不会离开这台设备。</p>
+
+        <form id="unlockForm" class="stack hidden">
+          <label>保险库密码<input id="unlockPassword" type="password" autocomplete="current-password" required></label>
+          <button class="primary" type="submit">解锁并扫描</button>
+        </form>
+
+        <form id="initForm" class="stack hidden">
+          <label>保险库目录
+            <div class="inline-field"><input id="rootPath" type="text" spellcheck="false"><button id="applyRoot" type="button" class="secondary">应用</button></div>
+          </label>
+          <div class="summary" id="rootSummary"><span>文件 —</span><span>容量 —</span></div>
+          <label>设置密码<input id="initPassword" type="password" autocomplete="new-password" required></label>
+          <label>再次输入<input id="initConfirmation" type="password" autocomplete="new-password" required></label>
+          <div class="warning">忘记密码将无法恢复。加密前请确保重要文件已有独立备份。</div>
+          <button class="primary" type="submit">初始化并加密</button>
+        </form>
+        <div id="accessError" class="error hidden"></div>
+      </section>
+
+      <section id="workspace" class="workspace hidden">
+        <aside class="sidebar">
+          <div class="sidebar-head">
+            <span class="eyebrow">VAULT</span>
+            <button id="rescanButton" class="icon-button" title="重新扫描">↻</button>
+          </div>
+          <div class="root-label" id="rootLabel"></div>
+          <nav class="breadcrumbs" id="breadcrumbs"></nav>
+          <div class="file-list" id="fileList"></div>
+        </aside>
+        <section class="content">
+          <div class="content-head">
+            <div><span class="eyebrow">PREVIEW</span><h2 id="previewTitle">选择文件</h2></div>
+            <div class="actions">
+              <button id="downloadButton" class="secondary" disabled>下载</button>
+              <button id="exportFolderButton" class="secondary">导出当前目录</button>
+              <button id="verifyButton" class="secondary">完整校验</button>
+              <button id="passwordButton" class="secondary">修改密码</button>
+              <button id="lockButton" class="secondary">锁定</button>
+              <button id="shutdownButton" class="danger-button">退出</button>
+            </div>
+          </div>
+          <div class="operation hidden" id="operationPanel">
+            <div class="operation-row"><span id="operationText">正在扫描</span><span id="operationCount"></span></div>
+            <div class="progress"><i id="progressBar"></i></div>
+            <div id="operationErrors" class="operation-errors"></div>
+          </div>
+          <div class="preview empty" id="preview"><div class="empty-state"><span>◇</span><p>从左侧选择文件进行安全预览</p></div></div>
+        </section>
+      </section>
+      <div id="toast" class="toast hidden"></div>
+    </main>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
