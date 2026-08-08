@@ -237,7 +237,9 @@ def encrypt_file(path: Path, session: VaultSession, chunk_size: int = DEFAULT_CH
             or current.st_mtime_ns != initial.st_mtime_ns
         ):
             raise ConcurrentModification("Source changed before atomic replacement")
-        os.utime(temporary, ns=(initial.st_atime_ns, initial.st_mtime_ns), follow_symlinks=False)
+        # `temporary` is created with exclusive creation above, so it cannot
+        # be a symlink. Windows does not implement follow_symlinks for utime.
+        os.utime(temporary, ns=(initial.st_atime_ns, initial.st_mtime_ns))
         os.replace(temporary, path)
         fsync_directory(path.parent)
         return verified
@@ -291,7 +293,7 @@ def rewrap_file_header(
                 raise ConcurrentModification("Source changed during password update")
             with temporary.open("rb") as check:
                 verified = read_header(check, target_session)
-            os.utime(temporary, ns=(initial.st_atime_ns, initial.st_mtime_ns), follow_symlinks=False)
+            os.utime(temporary, ns=(initial.st_atime_ns, initial.st_mtime_ns))
             os.replace(temporary, path)
             fsync_directory(path.parent)
             return verified

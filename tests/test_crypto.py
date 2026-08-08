@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 import pytest
+import cryptobox.crypto as crypto_module
 
 from cryptobox.constants import HEADER_SIZE
 from cryptobox.crypto import (
@@ -111,6 +112,24 @@ def test_wrong_password_and_password_change(tmp_path: Path) -> None:
     assert b"".join(iter_decrypted(protected, unlocked)) == (
         b"password changes only rewrap the authenticated file header"
     )
+
+
+def test_timestamp_restore_is_portable_to_windows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows' os.utime does not accept the follow_symlinks keyword."""
+    manager = VaultManager(tmp_path)
+    session = manager.create(PASSWORD)
+    protected = tmp_path / "portable.txt"
+    protected.write_bytes(b"portable timestamp update")
+    calls: list[tuple[Path, tuple[int, int]]] = []
+
+    def portable_utime(path: Path, *, ns: tuple[int, int]) -> None:
+        calls.append((Path(path), ns))
+
+    monkeypatch.setattr(crypto_module.os, "utime", portable_utime)
+    encrypt_file(protected, session)
+    manager.change_password(session, "new-password")
+
+    assert len(calls) == 2
 
 
 def test_vault_metadata_can_be_rebuilt_from_encrypted_file_and_password(tmp_path: Path) -> None:
