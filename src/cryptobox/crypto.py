@@ -29,7 +29,7 @@ from .constants import (
     TEMP_PREFIX,
 )
 from .errors import ConcurrentModification, CorruptFile, InvalidVault, PlainFile
-from .util import fsync_directory
+from .util import _atomic_replace, fsync_directory
 from .vault import VaultSession
 
 _HEADER_FIELDS = struct.Struct(">8sHHI16s16sQIQ4s40s")
@@ -240,7 +240,7 @@ def encrypt_file(path: Path, session: VaultSession, chunk_size: int = DEFAULT_CH
         # `temporary` is created with exclusive creation above, so it cannot
         # be a symlink. Windows does not implement follow_symlinks for utime.
         os.utime(temporary, ns=(initial.st_atime_ns, initial.st_mtime_ns))
-        os.replace(temporary, path)
+        _atomic_replace(temporary, path)
         fsync_directory(path.parent)
         return verified
     finally:
@@ -294,7 +294,7 @@ def rewrap_file_header(
             with temporary.open("rb") as check:
                 verified = read_header(check, target_session)
             os.utime(temporary, ns=(initial.st_atime_ns, initial.st_mtime_ns))
-            os.replace(temporary, path)
+            _atomic_replace(temporary, path)
             fsync_directory(path.parent)
             return verified
         finally:
@@ -348,7 +348,7 @@ def decrypt_to_path(source: Path, destination: Path, session: VaultSession) -> N
                 output.write(data)
             output.flush()
             os.fsync(output.fileno())
-        os.replace(temporary, destination)
+        _atomic_replace(temporary, destination)
         fsync_directory(destination.parent)
     finally:
         temporary.unlink(missing_ok=True)

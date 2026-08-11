@@ -95,7 +95,11 @@ def iter_regular_files(
                 if entry.is_dir(follow_symlinks=False):
                     stack.append(path)
                     continue
-                stat_result = entry.stat(follow_symlinks=False)
+                # Use a full os.stat rather than DirEntry.stat: on Windows the
+                # directory-entry stat reports st_dev/st_ino as 0 and unreliable
+                # st_nlink, which would break cache matching (put_encrypted stores
+                # the real values from os.stat) and hard-link detection.
+                stat_result = path.stat(follow_symlinks=False)
                 if stat_module.S_ISREG(stat_result.st_mode):
                     yield path, path.relative_to(root), stat_result
             except OSError as exc:

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import base64
+import errno
 import hmac
 import os
+import stat as stat_module
 import sys
+import time
 from pathlib import Path
 
 from .constants import CONTROL_DIR, TEMP_PREFIX
@@ -94,3 +97,40 @@ def reject_source_tree(root: Path) -> None:
     root = root.resolve()
     if (root / "pyproject.toml").exists() and (root / "src" / "cryptobox").is_dir():
         raise UnsafePath("The Cryptobox source tree cannot be initialized as a vault")
+
+
+def _atomic_replace(temporary: Path, destination: Path, *, attempts: int = 5) -> None:
+    """Move ``temporary`` onto ``destination`` atomically, tolerant of Windows quirks.
+
+    On Windows ``os.replace`` (``MoveFileExW`` with ``MOVEFILE_REPLACE_EXISTING``)
+    fails with ``WinError 5`` (ERROR_ACCESS_DENIED) when the destination file is
+    read-only, because replacing it requires deleting the existing file first. It can
+    also fail transiently with ``WinError 32`` (sharing violation) while anti-virus or
+    the Explorer preview handler briefly holds a lock on the file.
+
+    We strip the read-only bit from an existing destination before replacing, and we
+    retry transient access errors with a small exponential backoff so a single locked
+    file does not abort an otherwise successful batch. Non-access errors are re-raised
+    immediately so genuine problems (bad paths, disks full) are not masked.
+    """
+    destination = Path(destination)
+    if os.name == "nt" and destination.exists():
+        try:
+            mode = destination.stat().st_mode
+            if not (mode & stat_module.S_IWRITE):
+                os.chmod(destination, mode | stat_module.S_IWRITE)
+        except OSError:
+            pass
+    for attempt in range(max(1, attempts)):
+        try:
+            os.replace(temporary, destination)
+            return
+        except OSError as exc:
+            transient = (
+                getattr(exc, "winerror", None) in (5, 32)
+                if os.name == "nt"
+                else exc.errno in (errno.EACCES, errno.EPERM)
+            )
+            if not transient or attempt == max(1, attempts) - 1:
+                raise
+            time.sleep(0.1 * (attempt + 1))

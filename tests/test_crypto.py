@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
 import cryptobox.crypto as crypto_module
+import cryptobox.util as util_module
 
 from cryptobox.constants import HEADER_SIZE
 from cryptobox.crypto import (
@@ -165,3 +168,64 @@ def test_control_directory_symlink_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(InvalidVault):
         VaultManager(tmp_path).create(PASSWORD)
     assert list(outside.iterdir()) == []
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="read-only target only blocks os.replace on Windows")
+def test_encrypt_succeeds_on_readonly_destination(tmp_path: Path) -> None:
+    """A read-only plaintext must still be encrypted in place (WinError 5 fix)."""
+    session = unlocked_vault(tmp_path)
+    source = tmp_path / "readonly.pdf"
+    source.write_bytes(b"confidential payload" * 200)
+    os.chmod(source, 0o444)
+    try:
+        header = encrypt_file(source, session, chunk_size=4096)
+    finally:
+        # Restore writability so the test harness can clean up tmp_path.
+        os.chmod(source, 0o644)
+    assert source.read_bytes()[:8] == b"CRBOXF01"
+    assert header.plain_size == len(b"confidential payload" * 200)
+    assert b"".join(iter_decrypted(source, session)) == b"confidential payload" * 200
+
+
+def test_atomic_replace_retries_on_transient_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """_atomic_replace must retry a transient access error before giving up."""
+    temporary = tmp_path / "tmp.bin"
+    temporary.write_bytes(b"new-content")
+    destination = tmp_path / "dest.bin"
+    destination.write_bytes(b"old-content")
+
+    calls = {"n": 0}
+    real_replace = util_module.os.replace
+
+    def flaky_replace(src: Path, dst: Path) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            exc = OSError("Access is denied")
+            exc.winerror = 5
+            exc.errno = errno.EACCES
+            raise exc
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(util_module.os, "replace", flaky_replace)
+
+    util_module._atomic_replace(temporary, destination)
+    assert calls["n"] == 2
+    assert destination.read_bytes() == b"new-content"
+    assert not temporary.exists()
+
+
+def test_atomic_replace_raises_non_access_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Non-access OSErrors (e.g. a bad path) must not be swallowed or retried."""
+    temporary = tmp_path / "tmp.bin"
+    temporary.write_bytes(b"x")
+    destination = tmp_path / "dest.bin"
+    destination.write_bytes(b"old")
+
+    def boom(_src: Path, _dst: Path) -> None:
+        raise OSError("something else entirely")
+
+    monkeypatch.setattr(util_module.os, "replace", boom)
+
+    with pytest.raises(OSError):
+        util_module._atomic_replace(temporary, destination)
+    assert destination.read_bytes() == b"old"

@@ -24,7 +24,7 @@ from .constants import (
     META_FILE,
 )
 from .errors import InvalidPassword, InvalidVault
-from .util import b64d, b64e, fsync_directory
+from .util import _atomic_replace, b64d, b64e, fsync_directory
 
 _PUBLIC_HEADER = struct.Struct(">8sHHI16s")
 _DIRECT_KEY_MODE = "password-derived-argon2id"
@@ -69,7 +69,7 @@ def _atomic_json(path: Path, value: dict[str, object]) -> None:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        _atomic_replace(temporary, path)
         fsync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
