@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import io
+import os
 import time
+import tomllib
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -15,6 +18,7 @@ from cryptobox.service import RuntimeState
 from cryptobox.settings import load_last_root
 from cryptobox.vault import VaultManager
 import cryptobox.api as api_module
+import cryptobox
 
 
 def prepared_file_runtime(root: Path, name: str, payload: bytes) -> RuntimeState:
@@ -34,6 +38,18 @@ def prepared_runtime(root: Path) -> tuple[RuntimeState, bytes]:
     payload = (b"0123456789abcdef" * 4096) + b"tail"
     runtime = prepared_file_runtime(root, "movie.mp4", payload)
     return runtime, payload
+
+
+def test_web_version_matches_project_version(tmp_path: Path) -> None:
+    project_file = Path(__file__).parents[1] / "pyproject.toml"
+    with project_file.open("rb") as handle:
+        project_version = tomllib.load(handle)["project"]["version"]
+    runtime = RuntimeState(tmp_path)
+    app = create_app(runtime, "version-token")
+
+    with TestClient(app) as client:
+        assert cryptobox.__version__ == project_version
+        assert client.get("/api/version").json() == {"version": project_version}
 
 
 def test_bootstrap_is_one_time_and_range_is_exact(tmp_path: Path) -> None:
@@ -221,6 +237,64 @@ def test_tree_shows_encrypted_and_plain_files_but_plain_content_is_rejected(tmp_
         assert entries["arrived-later.bin"]["size"] == len(b"not encrypted yet")
         assert client.get(f"/api/content/{entries['arrived-later.bin']['id']}").status_code == 409
         assert client.get(f"/api/download/{entries['arrived-later.bin']['id']}").status_code == 409
+
+
+def test_tree_uses_full_path_stat_to_match_encrypted_index_on_windows(
+    tmp_path: Path, monkeypatch
+) -> None:
+    payload = b"encrypted content remains available through the API"
+    runtime = prepared_file_runtime(tmp_path, "protected.txt", payload)
+    real_scandir = api_module.os.scandir
+
+    class EntryWithUnreliableWindowsStat:
+        def __init__(self, entry: os.DirEntry[str]):
+            self._entry = entry
+
+        def __getattr__(self, name: str):
+            return getattr(self._entry, name)
+
+        def stat(self, *, follow_symlinks: bool = True):
+            actual = self._entry.stat(follow_symlinks=follow_symlinks)
+            return SimpleNamespace(
+                st_dev=0,
+                st_ino=0,
+                st_size=actual.st_size,
+                st_mtime=actual.st_mtime,
+                st_mtime_ns=actual.st_mtime_ns,
+            )
+
+    class ScandirWithUnreliableWindowsStat:
+        def __init__(self, path: Path):
+            self._entries = real_scandir(path)
+
+        def __enter__(self):
+            self._entries.__enter__()
+            return self
+
+        def __exit__(self, *args: object):
+            return self._entries.__exit__(*args)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return EntryWithUnreliableWindowsStat(next(self._entries))
+
+    monkeypatch.setattr(
+        api_module.os,
+        "scandir",
+        lambda path: ScandirWithUnreliableWindowsStat(Path(path)),
+    )
+    app = create_app(runtime, "windows-stat-token")
+
+    with TestClient(app) as client:
+        client.get("/?token=windows-stat-token")
+        entry = client.get("/api/tree").json()["entries"][0]
+
+        assert entry["encrypted"] is True
+        assert entry["size"] == len(payload)
+        assert client.get(f"/api/content/{entry['id']}").content == payload
+        assert client.get(f"/api/download/{entry['id']}").content == payload
 
 
 def test_change_root_locks_current_vault_and_remembers_new_root(tmp_path: Path) -> None:

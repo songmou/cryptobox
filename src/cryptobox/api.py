@@ -278,7 +278,12 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
                 if child.is_dir(follow_symlinks=False):
                     item = {"id": path_to_id(child_relative), "name": display_name(path), "kind": "directory"}
                 elif child.is_file(follow_symlinks=False):
-                    stat_result = child.stat(follow_symlinks=False)
+                    # DirEntry.stat() can report zero or otherwise unreliable
+                    # device/inode values on Windows.  The scanner records the
+                    # full Path.stat() identity in the authenticated index, so
+                    # use the same source here when deciding whether a cached
+                    # encrypted entry is still the file on disk.
+                    stat_result = path.stat(follow_symlinks=False)
                     cached = runtime.index.get_if_unchanged(child_relative, stat_result)
                     item = {
                         "id": path_to_id(child_relative),

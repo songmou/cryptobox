@@ -76,7 +76,12 @@ a = Analysis(
     ["cryptobox_entry.py"],
     pathex=["src"],
     binaries=[],
-    datas=[("src/cryptobox/static", "cryptobox/static")],
+    # Bundle the same project metadata used above so frozen applications report
+    # the exact version that also determines their executable filename.
+    datas=[
+        ("src/cryptobox/static", "cryptobox/static"),
+        ("pyproject.toml", "."),
+    ],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
