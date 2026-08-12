@@ -34,6 +34,13 @@ if (-not (Test-Path ".\.venv\Scripts\python.exe")) {
 # 编译。先输出到临时目录 dist_build，避免旧 dist\cryptobox.exe 被占用
 # （例如 Windows Defender 实时扫描锁文件）导致覆盖失败。
 Write-Host "构建 Cryptobox（平台: Windows）..."
+if ((Get-Command npm -ErrorAction SilentlyContinue) -and (Test-Path ".\node_modules")) {
+    & npm run build:preview
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+} elseif (-not (Test-Path ".\src\cryptobox\static\preview-host.js") -or -not (Test-Path ".\src\cryptobox\static\THIRD_PARTY_NOTICES.txt")) {
+    Write-Host "错误：缺少网页预览静态包。请安装 Node.js 后运行 npm ci 和 npm run build:preview。" -ForegroundColor Red
+    exit 1
+}
 & .\.venv\Scripts\python.exe -m PyInstaller --noconfirm cryptobox.spec --distpath dist_build
 if (-not (Test-Path ".\dist_build\$ExeName")) {
     Write-Host "错误：构建失败，未生成 dist_build\$ExeName。" -ForegroundColor Red
@@ -55,4 +62,3 @@ Move-Item -Path .\dist_build -Destination .\dist -Force
 
 Write-Host ""
 Write-Host "构建完成：dist\$ExeName（版本 $Version）" -ForegroundColor Green
-

@@ -12,3 +12,4 @@ dist/
 .cryptobox/
 
 .workbuddy/
+node_modules/

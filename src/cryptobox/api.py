@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import mimetypes
 import os
 import re
 import secrets
@@ -23,6 +22,7 @@ from .errors import CryptoboxError, InvalidPassword, UnsafePath
 from .scanner import iter_regular_files, preview_root
 from .service import RuntimeState
 from . import __version__
+from .preview import content_media_type, preview_kind
 from .util import (
     current_executable,
     display_name,
@@ -35,9 +35,6 @@ from .util import (
 )
 
 _RANGE = re.compile(r"^bytes=(\d*)-(\d*)$")
-_DANGEROUS_SUFFIXES = {".html", ".htm", ".svg", ".xml", ".js", ".mjs", ".xhtml"}
-
-
 class InitRequest(BaseModel):
     password: str
     password_confirmation: str
@@ -93,11 +90,23 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Cache-Control"] = "no-store"
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; img-src 'self' blob:; media-src 'self' blob:; "
-            "style-src 'self'; script-src 'self'; object-src 'self'; frame-src 'self'; "
-            "base-uri 'none'; frame-ancestors 'none'"
-        )
+        if request.url.path == "/static/preview-host.html":
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                "img-src blob: data:; media-src blob: data:; font-src blob: data:; "
+                "connect-src 'none'; object-src 'none'; frame-src blob:; base-uri 'none'; "
+                "form-action 'none'; frame-ancestors 'self'"
+            )
+        elif request.url.path.startswith("/api/content/"):
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; object-src 'self'; base-uri 'none'; frame-ancestors 'self'"
+            )
+        else:
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; img-src 'self' blob:; media-src 'self' blob:; "
+                "style-src 'self'; script-src 'self'; object-src 'self'; frame-src 'self'; "
+                "base-uri 'none'; frame-ancestors 'none'"
+            )
         return response
 
     def require_session(cryptobox_session: Annotated[str | None, Cookie()] = None) -> None:
@@ -276,6 +285,8 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
                             "kind": "file",
                             "size": cached.plain_size,
                             "modified": child.stat(follow_symlinks=False).st_mtime,
+                            "media_type": content_media_type(path.name),
+                            "preview_kind": preview_kind(path.name),
                         }
                 if item is None:
                     continue
@@ -323,10 +334,7 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
                 if start >= plain_size or end <= start:
                     return Response(status_code=416, headers={"Content-Range": f"bytes */{plain_size}"})
                 status_code = 206
-        suffix = path.suffix.lower()
-        media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        if suffix in _DANGEROUS_SUFFIXES:
-            media_type = "text/plain; charset=utf-8"
+        media_type = content_media_type(path.name)
         headers = {
             "Accept-Ranges": "bytes",
             "Content-Length": str(end - start),

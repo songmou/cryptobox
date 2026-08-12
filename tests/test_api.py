@@ -15,9 +15,8 @@ from cryptobox.service import RuntimeState
 from cryptobox.vault import VaultManager
 
 
-def prepared_runtime(root: Path) -> tuple[RuntimeState, bytes]:
-    payload = (b"0123456789abcdef" * 4096) + b"tail"
-    (root / "movie.mp4").write_bytes(payload)
+def prepared_file_runtime(root: Path, name: str, payload: bytes) -> RuntimeState:
+    (root / name).write_bytes(payload)
     session = VaultManager(root).create("correct horse battery staple")
     index = VaultIndex(session.index_path, session.derive_key(b"index"))
     scan_and_encrypt(root, session, index, StatusTracker())
@@ -26,6 +25,12 @@ def prepared_runtime(root: Path) -> tuple[RuntimeState, bytes]:
     runtime.attach_session(session)
     runtime.tracker.reset("ready")
     runtime.tracker.finish("ready")
+    return runtime
+
+
+def prepared_runtime(root: Path) -> tuple[RuntimeState, bytes]:
+    payload = (b"0123456789abcdef" * 4096) + b"tail"
+    runtime = prepared_file_runtime(root, "movie.mp4", payload)
     return runtime, payload
 
 
@@ -58,6 +63,32 @@ def test_bootstrap_is_one_time_and_range_is_exact(tmp_path: Path) -> None:
         with zipfile.ZipFile(io.BytesIO(archive_response.content)) as archive:
             assert archive.read("movie.mp4") == payload
         assert client.get(ticket.json()["url"]).status_code == 404
+
+
+def test_pdf_content_is_inline_and_same_origin_embeddable(tmp_path: Path) -> None:
+    payload = b"%PDF-1.4\n% minimal preview fixture\n"
+    runtime = prepared_file_runtime(tmp_path, "REPORT.PDF", payload)
+    app = create_app(runtime, "pdf-token")
+    with TestClient(app) as client:
+        index = client.get("/?token=pdf-token")
+        assert "frame-ancestors 'none'" in index.headers["content-security-policy"]
+
+        tree = client.get("/api/tree").json()
+        entry = tree["entries"][0]
+        assert entry["media_type"] == "application/pdf"
+        assert entry["preview_kind"] == "pdf"
+
+        content = client.get(f"/api/content/{entry['id']}")
+        assert content.content == payload
+        assert content.headers["content-type"] == "application/pdf"
+        assert content.headers["content-disposition"].startswith("inline;")
+        assert "frame-ancestors 'self'" in content.headers["content-security-policy"]
+        assert "frame-ancestors 'none'" not in content.headers["content-security-policy"]
+
+        preview_host = client.get("/static/preview-host.html")
+        preview_policy = preview_host.headers["content-security-policy"]
+        assert "connect-src 'none'" in preview_policy
+        assert "frame-ancestors 'self'" in preview_policy
 
 
 def test_host_and_csrf_are_enforced(tmp_path: Path) -> None:

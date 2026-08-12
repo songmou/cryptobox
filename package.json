@@ -1,0 +1,19 @@
+{
+  "name": "cryptobox-preview-assets",
+  "private": true,
+  "scripts": {
+    "build:preview": "node scripts/build-preview.mjs"
+  },
+  "dependencies": {
+    "docx-preview": "0.4.0",
+    "dompurify": "3.4.13",
+    "jszip": "3.10.1",
+    "markdown-it": "15.0.0",
+    "pptx-vanilla-viewer": "1.18.9",
+    "three": "0.185.1",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

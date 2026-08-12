@@ -1,6 +1,6 @@
 # Cryptobox
 
-Cryptobox 是一个本机加密文件浏览器。它递归保护指定目录中的普通文件，并通过仅绑定回环地址的 Web 页面提供文件列表、文本、图片、音频、视频和 PDF 预览。
+Cryptobox 是一个本机加密文件浏览器。它递归保护指定目录中的普通文件，并通过仅绑定回环地址的 Web 页面提供文件列表和离线文件预览。
 
 ## 重要警告
 
@@ -28,6 +28,22 @@ python3.13 -m venv .venv
 
 首次使用在 Web 中确认目录并设置两次相同的密码，提交后开始初始化和加密。后续启动同样在 Web 中输入密码。
 
+## 网页预览格式
+
+| 类型 | 支持格式 | 说明 |
+| --- | --- | --- |
+| PDF | `pdf` | 使用浏览器 PDF 阅读器，支持 Range 请求 |
+| 图片 | `png`、`jpg`、`jpeg`、`gif`、`webp`、`bmp`、`ico`、`avif`、`svg` | SVG 在无同源权限沙箱中清理后显示 |
+| 音视频 | `mp3`、`wav`、`flac`、`m4a`、`aac`、`ogg`、`opus`、`mp4`、`webm`、`mov`、`m4v`、`ogv` | 能否播放取决于浏览器支持的编码 |
+| 文本 | 常见文本、代码、配置、JSON、XML、YAML、TOML、INI、无扩展名 UTF-8 文本 | 最大 5 MB；HTML 可安全渲染，脚本和表单会被移除 |
+| Markdown / 表格 | `md`、`markdown`、`csv`、`tsv` | Markdown 不执行内嵌 HTML；CSV/TSV 显示为表格 |
+| Word | `docx`、`docm`、`dotx` | 宏和嵌入的活动 HTML 不会执行 |
+| Excel | `xlsx`、`xlsm`、`xlsb`、`ods` | 支持工作表切换；宏不会执行 |
+| PowerPoint | `pptx`、`pptm`、`ppsx` | 支持幻灯片和缩略图；宏不会执行 |
+| 电子书 / 压缩包 | `epub`、`zip` | EPUB 按章节显示；ZIP 只列目录，不解压内容 |
+
+Office、EPUB 和 ZIP 的网页预览上限为 50 MB。旧版 `doc`、`xls`、`ppt`、受密码保护的 Office 文件和未知二进制格式不会转换，仍可通过下载按钮导出。
+
 ## 测试
 
 ```bash
@@ -38,6 +54,13 @@ python3.13 -m venv .venv
 
 ## 打包
 
+预览依赖已编译到 `src/cryptobox/static/preview-host.js` 并提交到仓库，运行和普通 PyInstaller 打包不需要 Node.js。修改 `preview-host-src.js` 或升级预览依赖时，需要 Node.js 20 以上并重新生成静态包：
+
+```bash
+npm ci
+npm run build:preview
+```
+
 ```bash
 .venv/bin/pyinstaller --clean --noconfirm cryptobox.spec
 ```
@@ -47,7 +70,7 @@ python3.13 -m venv .venv
 ## 使用边界
 
 - Web 服务固定绑定 `127.0.0.1`，不能作为公网服务使用。
-- 首期 Web 为只读：可以预览、下载、导出目录、校验和修改密码，不能上传、移动、重命名或删除。
+- Web 为只读：可以预览、下载、导出目录、校验和修改密码，不能上传、移动、重命名或删除。
 - `.cryptobox` 控制目录、运行中的打包程序和 Cryptobox 临时文件不会被加密。
 - 符号链接不会被跟随；硬链接文件会报告错误并保持原状。
 

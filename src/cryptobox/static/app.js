@@ -1,5 +1,20 @@
 const $ = (selector) => document.querySelector(selector);
-const state = { csrf: "", status: null, currentPath: "", nextOffset: 0, history: [{ id: "", name: "根目录" }], selected: null, poll: null };
+const state = {
+  csrf: "",
+  status: null,
+  currentPath: "",
+  nextOffset: 0,
+  history: [{ id: "", name: "根目录" }],
+  selected: null,
+  poll: null,
+  previewController: null,
+  previewCleanup: null,
+  previewRequest: 0,
+};
+
+const TEXT_PREVIEW_LIMIT = 5 * 1024 * 1024;
+const DOCUMENT_PREVIEW_LIMIT = 50 * 1024 * 1024;
+const SANDBOX_KINDS = new Set(["text", "unknown", "markdown", "table", "html", "svg", "word", "spreadsheet", "presentation", "ebook", "archive"]);
 
 function formatBytes(value = 0) {
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -10,6 +25,131 @@ function formatBytes(value = 0) {
 
 function escapeHtml(value) {
   return String(value).replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
+}
+
+function clearActivePreview() {
+  state.previewRequest += 1;
+  if (state.previewController) state.previewController.abort();
+  if (state.previewCleanup) state.previewCleanup();
+  state.previewController = null;
+  state.previewCleanup = null;
+}
+
+function previewMessage(message, symbol = "⇩", kind = "") {
+  const target = $("#preview");
+  const box = document.createElement("div");
+  box.className = `empty-state${kind ? ` ${kind}` : ""}`;
+  const icon = document.createElement("span");
+  const text = document.createElement("p");
+  icon.textContent = symbol;
+  text.textContent = message;
+  box.append(icon, text);
+  target.replaceChildren(box);
+}
+
+function contentUrl(entry) {
+  return `/api/content/${encodeURIComponent(entry.id)}`;
+}
+
+function showNativePreview(entry, kind) {
+  const target = $("#preview");
+  const url = contentUrl(entry);
+  let node;
+  if (kind === "image") {
+    node = document.createElement("img");
+    node.alt = entry.name;
+  } else if (kind === "video") {
+    node = document.createElement("video");
+    node.controls = true;
+    node.preload = "metadata";
+  } else if (kind === "audio") {
+    node = document.createElement("audio");
+    node.controls = true;
+    node.preload = "metadata";
+  } else {
+    node = document.createElement("iframe");
+    node.title = entry.name;
+  }
+  node.addEventListener("error", () => {
+    previewMessage("浏览器无法解码此文件或媒体编码，可使用下载按钮保存后查看。", "!", "preview-warning");
+  }, { once: true });
+  node.src = url;
+  target.replaceChildren(node);
+}
+
+function createSandboxFrame(requestId) {
+  const target = $("#preview");
+  const frame = document.createElement("iframe");
+  frame.title = "安全文件预览";
+  frame.className = "sandbox-preview";
+  frame.setAttribute("sandbox", "allow-scripts");
+  frame.src = "/static/preview-host.html";
+
+  let readyResolve;
+  let readyReject;
+  const ready = new Promise((resolve, reject) => {
+    readyResolve = resolve;
+    readyReject = reject;
+  });
+  const timeout = setTimeout(() => readyReject(new Error("安全预览器加载超时")), 20000);
+  const onMessage = (event) => {
+    if (event.source !== frame.contentWindow) return;
+    if (event.data?.type === "cryptobox-preview-ready") {
+      clearTimeout(timeout);
+      readyResolve();
+    } else if (event.data?.requestId === requestId && event.data?.type === "cryptobox-preview-error") {
+      toast(`无法预览：${event.data.message || "文件解析失败"}`);
+    }
+  };
+  window.addEventListener("message", onMessage);
+  state.previewCleanup = () => {
+    clearTimeout(timeout);
+    window.removeEventListener("message", onMessage);
+    frame.src = "about:blank";
+  };
+  target.replaceChildren(frame);
+  return { frame, ready };
+}
+
+async function showSandboxPreview(entry, kind, requestId) {
+  const limit = ["text", "unknown", "markdown", "table", "html", "svg"].includes(kind)
+    ? TEXT_PREVIEW_LIMIT
+    : DOCUMENT_PREVIEW_LIMIT;
+  if (entry.size > limit) {
+    const label = limit === TEXT_PREVIEW_LIMIT ? "5 MB" : "50 MB";
+    previewMessage(`文件超过 ${label} 的安全预览上限，可使用下载按钮保存。`, "⇩", "preview-warning");
+    return;
+  }
+
+  const { frame, ready } = createSandboxFrame(requestId);
+  state.previewController = new AbortController();
+  const responsePromise = fetch(contentUrl(entry), {
+    credentials: "same-origin",
+    signal: state.previewController.signal,
+  }).then(async (response) => {
+    if (!response.ok) {
+      let message = `${response.status} ${response.statusText}`;
+      try { message = (await response.json()).detail || message; } catch (_) {}
+      throw new Error(message);
+    }
+    return response.arrayBuffer();
+  });
+
+  try {
+    const [buffer] = await Promise.all([responsePromise, ready]);
+    if (requestId !== state.previewRequest || !frame.contentWindow) return;
+    frame.contentWindow.postMessage({
+      type: "cryptobox-preview",
+      requestId,
+      kind,
+      name: entry.name,
+      mediaType: entry.media_type || "application/octet-stream",
+      buffer,
+    }, "*", [buffer]);
+  } catch (error) {
+    if (error.name === "AbortError" || requestId !== state.previewRequest) return;
+    previewMessage(`无法预览：${error.message}`, "!", "preview-warning");
+  }
 }
 
 async function api(url, options = {}) {
@@ -163,26 +303,23 @@ async function loadTree(pathId = "", append = false) {
 }
 
 async function previewFile(entry) {
+  clearActivePreview();
   state.selected = entry;
   $("#previewTitle").textContent = entry.name;
   $("#downloadButton").disabled = false;
   const target = $("#preview");
   target.classList.remove("empty");
-  const url = `/api/content/${encodeURIComponent(entry.id)}`;
-  const extension = entry.name.split(".").pop().toLowerCase();
-  const images = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "avif"];
-  const videos = ["mp4", "webm", "mov", "m4v", "ogv"];
-  const audio = ["mp3", "wav", "flac", "m4a", "aac", "ogg", "opus"];
-  const text = ["txt", "md", "json", "csv", "log", "py", "js", "ts", "html", "css", "xml", "yaml", "yml", "toml", "ini", "sh"];
-  if (images.includes(extension)) target.innerHTML = `<img src="${url}" alt="${escapeHtml(entry.name)}">`;
-  else if (videos.includes(extension)) target.innerHTML = `<video src="${url}" controls autoplay></video>`;
-  else if (audio.includes(extension)) target.innerHTML = `<audio src="${url}" controls autoplay></audio>`;
-  else if (extension === "pdf") target.innerHTML = `<iframe src="${url}" title="${escapeHtml(entry.name)}"></iframe>`;
-  else if (text.includes(extension) && entry.size <= 5 * 1024 * 1024) {
-    target.innerHTML = '<div class="empty-state"><p>正在解密文本…</p></div>';
-    try { target.innerHTML = `<pre>${escapeHtml(await (await fetch(url)).text())}</pre>`; }
-    catch (error) { target.innerHTML = `<div class="error">${escapeHtml(error.message)}</div>`; }
-  } else target.innerHTML = `<div class="empty-state"><span>⇩</span><p>此格式不支持内嵌预览，可安全下载。</p></div>`;
+  const kind = entry.preview_kind || "unsupported";
+  if (["image", "video", "audio", "pdf"].includes(kind)) {
+    showNativePreview(entry, kind);
+  } else if (SANDBOX_KINDS.has(kind)) {
+    previewMessage("正在解密并准备安全预览…", "◇");
+    await showSandboxPreview(entry, kind, state.previewRequest);
+  } else if (["doc", "xls", "ppt"].includes(entry.name.split(".").pop().toLowerCase())) {
+    previewMessage("旧版 Office 格式暂不支持网页解析，可使用下载按钮保存。", "⇩");
+  } else {
+    previewMessage("此格式没有可用的安全网页预览器，可使用下载按钮保存。", "⇩");
+  }
 }
 
 $("#unlockForm").addEventListener("submit", async (event) => {
@@ -217,7 +354,7 @@ $("#applyRoot").addEventListener("click", async () => {
 });
 $("#rescanButton").addEventListener("click", async () => { try { await api("/api/rescan", { method: "POST" }); } catch (error) { toast(error.message); } });
 $("#verifyButton").addEventListener("click", async () => { try { await api("/api/verify", { method: "POST" }); toast("完整校验已开始"); } catch (error) { toast(error.message); } });
-$("#lockButton").addEventListener("click", async () => { try { await api("/api/lock", { method: "POST" }); state.selected = null; $("#fileList").innerHTML = ""; await refreshStatus(); } catch (error) { toast(error.message); } });
+$("#lockButton").addEventListener("click", async () => { try { clearActivePreview(); await api("/api/lock", { method: "POST" }); state.selected = null; $("#fileList").innerHTML = ""; await refreshStatus(); } catch (error) { toast(error.message); } });
 $("#shutdownButton").addEventListener("click", async () => { if (confirm("确定退出 Cryptobox？")) { try { await api("/api/shutdown", { method: "POST" }); document.body.innerHTML = '<div class="access-card"><h1>Cryptobox 已安全退出</h1><p>现在可以关闭此页面。</p></div>'; } catch (error) { toast(error.message); } } });
 $("#downloadButton").addEventListener("click", () => { if (state.selected) window.location.href = `/api/download/${encodeURIComponent(state.selected.id)}`; });
 $("#exportFolderButton").addEventListener("click", async () => {

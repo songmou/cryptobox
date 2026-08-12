@@ -25,6 +25,12 @@ if [ ! -x ".venv/bin/python" ]; then
 fi
 
 echo "构建 Cryptobox（平台: $OS）..."
+if command -v npm >/dev/null 2>&1 && [ -d node_modules ]; then
+  npm run build:preview
+elif [ ! -f "src/cryptobox/static/preview-host.js" ] || [ ! -f "src/cryptobox/static/THIRD_PARTY_NOTICES.txt" ]; then
+  echo "错误：缺少网页预览静态包。请安装 Node.js 后运行 npm ci 和 npm run build:preview。" >&2
+  exit 1
+fi
 "$project_dir/.venv/bin/pyinstaller" --clean --noconfirm cryptobox.spec
 
 # 从 pyproject.toml 读取版本号，报告产物名（dist/cryptobox-<版本>）
