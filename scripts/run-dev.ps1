@@ -19,10 +19,18 @@ Write-Host "启动 Cryptobox"
 Write-Host "  平台   : Windows"
 Write-Host "  保险库 : $Vault"
 
-# 选择入口：优先 dist 编译产物，其次 venv，最后 python -m
-if (Test-Path "dist\cryptobox.exe") {
-    Write-Host "  入口   : dist\cryptobox.exe"
-    & "dist\cryptobox.exe" --root $Vault
+# 选择入口：优先 dist 编译产物（按 pyproject.toml 版本号定位），其次 venv，最后 python -m
+$Version = "0.0.0"
+if (Test-Path ".\pyproject.toml") {
+    $pyprojectText = Get-Content ".\pyproject.toml" -Raw
+    if ($pyprojectText -match '(?m)^\s*version\s*=\s*"([^"]+)"') {
+        $Version = $Matches[1]
+    }
+}
+$DistExe = "dist\cryptobox-$Version.exe"
+if (Test-Path $DistExe) {
+    Write-Host "  入口   : $DistExe"
+    & $DistExe --root $Vault
 } elseif (Test-Path ".venv\Scripts\cryptobox.exe") {
     Write-Host "  入口   : .venv\Scripts\cryptobox.exe"
     & ".venv\Scripts\cryptobox.exe" --root $Vault

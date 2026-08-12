@@ -24,6 +24,13 @@ if (Test-Path ".\pyproject.toml") {
 }
 $ExeName = "cryptobox-$Version.exe"
 
+# 版本冲突检查：dist 中已存在同版本 exe 则中止，保留历史文件不动
+if (Test-Path ".\dist\$ExeName") {
+    Write-Host "错误：版本文件已存在：dist\$ExeName。" -ForegroundColor Red
+    Write-Host "当前 pyproject.toml 版本号为 $Version，请更新版本号后重新打包。" -ForegroundColor Yellow
+    exit 1
+}
+
 # 若 .venv 不存在则自动创建并安装依赖
 if (-not (Test-Path ".\.venv\Scripts\python.exe")) {
     Write-Host "未检测到 .venv，正在创建虚拟环境并安装依赖..."
@@ -47,18 +54,23 @@ if (-not (Test-Path ".\dist_build\$ExeName")) {
     exit 1
 }
 
-# 把新产物扶正为 dist；旧 dist 改名存档为 dist.bak。
-# 若旧 dist 被占用（服务仍在运行 / 杀毒软件锁定），提示先关闭后重试。
-if (Test-Path ".\dist") {
-    try {
-        if (Test-Path ".\dist.bak") { Remove-Item -Recurse -Force .\dist.bak }
-        Move-Item -Path .\dist -Destination .\dist.bak -Force
-    } catch {
-        Write-Host "无法移动旧 dist（可能被正在运行的服务或杀毒软件锁定）。请先停止 cryptobox 服务后重试。" -ForegroundColor Red
-        exit 1
-    }
+# 将新产物并入 dist，保留历史版本的 exe（不再改名存档为 dist.bak）。
+# 仍先构建到临时目录 dist_build，避免 PyInstaller --noconfirm 清空整个 dist。
+if (-not (Test-Path ".\dist")) {
+    New-Item -ItemType Directory -Path ".\dist" | Out-Null
 }
-Move-Item -Path .\dist_build -Destination .\dist -Force
+try {
+    Move-Item -Path ".\dist_build\$ExeName" -Destination ".\dist\$ExeName" -Force
+} catch {
+    Write-Host "无法写入 dist\$ExeName（可能被正在运行的服务或杀毒软件锁定）。请停止 cryptobox 服务后重试。" -ForegroundColor Red
+    Remove-Item -Recurse -Force .\dist_build
+    exit 1
+}
+try {
+    Remove-Item -Recurse -Force .\dist_build -ErrorAction Stop
+} catch {
+    Write-Host "警告：未能删除临时目录 dist_build（可能被杀毒软件锁定），可稍后手动删除。" -ForegroundColor Yellow
+}
 
 Write-Host ""
 Write-Host "构建完成：dist\$ExeName（版本 $Version）" -ForegroundColor Green
