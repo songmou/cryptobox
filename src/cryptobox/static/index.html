@@ -42,7 +42,10 @@
         <aside class="sidebar">
           <div class="sidebar-head">
             <span class="eyebrow">VAULT</span>
-            <button id="rescanButton" class="icon-button" title="重新扫描">↻</button>
+            <div class="sidebar-actions">
+              <button id="switchRootButton" class="icon-button" title="切换文件夹" aria-label="切换文件夹">⇄</button>
+              <button id="rescanButton" class="icon-button" title="重新扫描" aria-label="重新扫描">↻</button>
+            </div>
           </div>
           <div class="root-label" id="rootLabel"></div>
           <nav class="breadcrumbs" id="breadcrumbs"></nav>

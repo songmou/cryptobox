@@ -10,6 +10,7 @@ from watchdog.observers import Observer
 from .constants import CONTROL_DIR, TEMP_PREFIX
 from .index import VaultIndex
 from .scanner import StatusTracker, scan_and_encrypt, verify_all
+from .settings import save_last_root
 from .vault import VaultManager, VaultSession
 
 LOGGER = logging.getLogger(__name__)
@@ -34,8 +35,9 @@ class _ChangeHandler(FileSystemEventHandler):
 
 
 class RuntimeState:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, settings_path: Path | None = None):
         self.root = root.resolve()
+        self.settings_path = settings_path
         self.manager = VaultManager(self.root)
         self.session: VaultSession | None = None
         self.index: VaultIndex | None = None
@@ -51,11 +53,15 @@ class RuntimeState:
     def unlocked(self) -> bool:
         return self.session is not None and self.index is not None
 
-    def change_root(self, root: Path) -> None:
-        if self.unlocked:
-            raise RuntimeError("Lock the vault before changing its root")
+    async def change_root(self, root: Path) -> None:
+        await self.lock()
         self.root = root.resolve()
         self.manager = VaultManager(self.root)
+        if self.settings_path is not None:
+            try:
+                await asyncio.to_thread(save_last_root, self.settings_path, self.root)
+            except OSError:
+                LOGGER.warning("Unable to remember vault directory", exc_info=True)
 
     def attach_session(self, session: VaultSession) -> None:
         self.session = session
@@ -84,6 +90,7 @@ class RuntimeState:
         self.start_scan()
 
     async def lock(self) -> None:
+        await self.stop_watcher()
         if self.active_task and not self.active_task.done():
             try:
                 await self.active_task
@@ -92,6 +99,8 @@ class RuntimeState:
             except Exception:
                 LOGGER.exception("Active vault operation failed while locking")
         self.active_task = None
+        # A scan that completed while we were waiting may have restarted the
+        # watcher, so stop it again before closing the index and session.
         await self.stop_watcher()
         if self.index:
             self.index.close()
@@ -150,7 +159,7 @@ class RuntimeState:
                 continue
             try:
                 task = self.start_scan()
-                await task
+                await asyncio.shield(task)
             except asyncio.CancelledError:
                 raise
             except Exception:

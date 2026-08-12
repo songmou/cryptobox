@@ -16,6 +16,7 @@ import uvicorn
 from .api import create_app
 from .constants import APP_NAME, DEFAULT_PORT
 from .service import RuntimeState
+from .settings import load_last_root, save_last_root, settings_path
 from . import __version__
 
 
@@ -45,7 +46,12 @@ def configure_logging(level: str) -> None:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Local encrypted-file browser")
-    parser.add_argument("--root", type=Path, default=Path.cwd(), help="Vault root (default: current directory)")
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=None,
+        help="Vault root (default: last used directory, then current directory)",
+    )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Loopback port")
     parser.add_argument("--no-open", action="store_true", help="Do not open the browser automatically")
     parser.add_argument("--log-level", default="info", choices=["debug", "info", "warning", "error"])
@@ -53,12 +59,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def select_root(explicit: Path | None, config_path: Path, cwd: Path | None = None) -> Path:
+    if explicit is not None:
+        return explicit.expanduser().resolve()
+    return load_last_root(config_path) or (cwd or Path.cwd()).resolve()
+
+
 async def run(args: argparse.Namespace) -> None:
-    root = args.root.expanduser().resolve()
+    config_path = settings_path()
+    root = select_root(args.root, config_path)
     if not root.is_dir():
         raise SystemExit(f"Vault root does not exist: {root}")
     configure_logging(args.log_level)
-    runtime = RuntimeState(root)
+    try:
+        save_last_root(config_path, root)
+    except OSError:
+        logging.getLogger(__name__).warning("Unable to remember vault directory", exc_info=True)
+    runtime = RuntimeState(root, settings_path=config_path)
     bootstrap_token = secrets.token_urlsafe(32)
     app = create_app(runtime, bootstrap_token)
     config = uvicorn.Config(

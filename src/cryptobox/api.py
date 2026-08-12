@@ -179,14 +179,15 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
 
     @app.put("/api/root", dependencies=[Depends(require_csrf)])
     async def change_root(payload: RootRequest) -> dict[str, object]:
-        if runtime.manager.initialized or runtime.unlocked:
-            raise HTTPException(status_code=409, detail="Root can only be changed before initialization")
-        candidate = Path(payload.path).expanduser().resolve()
+        requested = Path(payload.path).expanduser()
+        if not requested.is_absolute():
+            raise HTTPException(status_code=400, detail="Root must be an absolute path")
+        candidate = requested.resolve()
         if not candidate.is_dir():
             raise HTTPException(status_code=400, detail="Root must be an existing directory")
         try:
             reject_source_tree(candidate)
-            runtime.change_root(candidate)
+            await runtime.change_root(candidate)
         except UnsafePath as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"root": str(runtime.root)}
@@ -277,17 +278,18 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
                 if child.is_dir(follow_symlinks=False):
                     item = {"id": path_to_id(child_relative), "name": display_name(path), "kind": "directory"}
                 elif child.is_file(follow_symlinks=False):
-                    cached = runtime.index.get_entry(child_relative)
-                    if cached is not None:
-                        item = {
-                            "id": path_to_id(child_relative),
-                            "name": display_name(path),
-                            "kind": "file",
-                            "size": cached.plain_size,
-                            "modified": child.stat(follow_symlinks=False).st_mtime,
-                            "media_type": content_media_type(path.name),
-                            "preview_kind": preview_kind(path.name),
-                        }
+                    stat_result = child.stat(follow_symlinks=False)
+                    cached = runtime.index.get_if_unchanged(child_relative, stat_result)
+                    item = {
+                        "id": path_to_id(child_relative),
+                        "name": display_name(path),
+                        "kind": "file",
+                        "size": cached.plain_size if cached is not None else stat_result.st_size,
+                        "modified": stat_result.st_mtime,
+                        "media_type": content_media_type(path.name),
+                        "preview_kind": preview_kind(path.name),
+                        "encrypted": cached is not None,
+                    }
                 if item is None:
                     continue
                 if visible_index < offset:
@@ -368,16 +370,19 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
         unlocked()
         assert runtime.session is not None
         selected: dict[Path, str] = {}
-        for item_id in payload.ids:
-            relative = id_to_relative(item_id)
-            path = safe_join(runtime.root, relative)
-            if path.is_dir():
-                for source, child_relative, _ in iter_regular_files(path):
-                    read_header_path(source, runtime.session)
-                    selected[source] = str(relative / child_relative).replace(os.sep, "/")
-            elif path.is_file():
-                read_header_path(path, runtime.session)
-                selected[path] = str(relative).replace(os.sep, "/")
+        try:
+            for item_id in payload.ids:
+                relative = id_to_relative(item_id)
+                path = safe_join(runtime.root, relative)
+                if path.is_dir():
+                    for source, child_relative, _ in iter_regular_files(path):
+                        read_header_path(source, runtime.session)
+                        selected[source] = str(relative / child_relative).replace(os.sep, "/")
+                elif path.is_file():
+                    read_header_path(path, runtime.session)
+                    selected[path] = str(relative).replace(os.sep, "/")
+        except CryptoboxError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if not selected:
             raise HTTPException(status_code=404, detail="No encrypted files selected")
         ticket = secrets.token_urlsafe(24)

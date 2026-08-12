@@ -10,6 +10,7 @@ const state = {
   previewController: null,
   previewCleanup: null,
   previewRequest: 0,
+  operationFinishedAt: null,
 };
 
 const TEXT_PREVIEW_LIMIT = 5 * 1024 * 1024;
@@ -35,7 +36,7 @@ function clearActivePreview() {
   state.previewCleanup = null;
 }
 
-function previewMessage(message, symbol = "⇩", kind = "") {
+function previewMessage(message, symbol = "⇩", kind = "", action = null) {
   const target = $("#preview");
   const box = document.createElement("div");
   box.className = `empty-state${kind ? ` ${kind}` : ""}`;
@@ -44,7 +45,46 @@ function previewMessage(message, symbol = "⇩", kind = "") {
   icon.textContent = symbol;
   text.textContent = message;
   box.append(icon, text);
+  if (action) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary preview-action";
+    button.textContent = action.label;
+    button.addEventListener("click", action.handler);
+    box.appendChild(button);
+  }
   target.replaceChildren(box);
+}
+
+const FILE_ICONS = {
+  directory: '<svg viewBox="0 0 24 24"><path d="M3 6.5h6l2 2h10v9.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
+  image: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m5 18 5-5 3 3 2-2 4 4"/></svg>',
+  audio: '<svg viewBox="0 0 24 24"><path d="M9 18V6l10-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/></svg>',
+  video: '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="14" height="14" rx="2"/><path d="m17 10 4-2v8l-4-2z"/></svg>',
+  pdf: '<svg viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v5h5M8 16c3-1 5-4 6-7 0 4 1 6 3 7-3-1-6-1-9 0z"/></svg>',
+  text: '<svg viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v5h5M9 12h6M9 16h6"/></svg>',
+  document: '<svg viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v5h5M9 12h6M9 16h4"/></svg>',
+  spreadsheet: '<svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M4 9h16M4 15h16M10 9v12"/></svg>',
+  presentation: '<svg viewBox="0 0 24 24"><path d="M4 4h16v12H4zM12 16v5M8 21h8"/><path d="m8 13 3-3 2 2 3-4"/></svg>',
+  archive: '<svg viewBox="0 0 24 24"><path d="M5 3h14v18H5zM9 3v3h3V3m-3 6h3v3H9m0 3h3v3H9"/></svg>',
+  generic: '<svg viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v5h5"/></svg>',
+};
+
+function fileIcon(entry) {
+  if (entry.kind === "directory") return FILE_ICONS.directory;
+  const kind = entry.preview_kind;
+  const extension = entry.name.includes(".") ? entry.name.split(".").pop().toLowerCase() : "";
+  if (extension === "doc") return FILE_ICONS.document;
+  if (extension === "xls") return FILE_ICONS.spreadsheet;
+  if (extension === "ppt") return FILE_ICONS.presentation;
+  if (["image", "svg"].includes(kind)) return FILE_ICONS.image;
+  if (["audio", "video", "pdf"].includes(kind)) return FILE_ICONS[kind];
+  if (["text", "unknown", "markdown", "html"].includes(kind)) return FILE_ICONS.text;
+  if (kind === "table" || kind === "spreadsheet") return FILE_ICONS.spreadsheet;
+  if (kind === "presentation") return FILE_ICONS.presentation;
+  if (["archive", "ebook"].includes(kind)) return FILE_ICONS.archive;
+  if (kind === "word") return FILE_ICONS.document;
+  return FILE_ICONS.generic;
 }
 
 function contentUrl(entry) {
@@ -77,7 +117,7 @@ function showNativePreview(entry, kind) {
   target.replaceChildren(node);
 }
 
-function createSandboxFrame(requestId) {
+function createSandboxFrame(requestId, errorPrefix = "无法预览") {
   const target = $("#preview");
   const frame = document.createElement("iframe");
   frame.title = "安全文件预览";
@@ -98,7 +138,7 @@ function createSandboxFrame(requestId) {
       clearTimeout(timeout);
       readyResolve();
     } else if (event.data?.requestId === requestId && event.data?.type === "cryptobox-preview-error") {
-      toast(`无法预览：${event.data.message || "文件解析失败"}`);
+      previewMessage(`${errorPrefix}：${event.data.message || "文件解析失败"}`, "!", "preview-warning");
     }
   };
   window.addEventListener("message", onMessage);
@@ -111,7 +151,7 @@ function createSandboxFrame(requestId) {
   return { frame, ready };
 }
 
-async function showSandboxPreview(entry, kind, requestId) {
+async function showSandboxPreview(entry, kind, requestId, errorPrefix = "无法预览") {
   const limit = ["text", "unknown", "markdown", "table", "html", "svg"].includes(kind)
     ? TEXT_PREVIEW_LIMIT
     : DOCUMENT_PREVIEW_LIMIT;
@@ -121,7 +161,7 @@ async function showSandboxPreview(entry, kind, requestId) {
     return;
   }
 
-  const { frame, ready } = createSandboxFrame(requestId);
+  const { frame, ready } = createSandboxFrame(requestId, errorPrefix);
   state.previewController = new AbortController();
   const responsePromise = fetch(contentUrl(entry), {
     credentials: "same-origin",
@@ -148,7 +188,7 @@ async function showSandboxPreview(entry, kind, requestId) {
     }, "*", [buffer]);
   } catch (error) {
     if (error.name === "AbortError" || requestId !== state.previewRequest) return;
-    previewMessage(`无法预览：${error.message}`, "!", "preview-warning");
+    previewMessage(`${errorPrefix}：${error.message}`, "!", "preview-warning");
   }
 }
 
@@ -232,7 +272,11 @@ function showWorkspace(info) {
   $("#workspace").classList.remove("hidden");
   const phase = info.operation.phase;
   setStatusPill(phase === "ready" ? "已保护" : phase === "error" ? "需要处理" : "正在处理", phase === "ready" ? "ready" : phase === "error" ? "error" : "");
-  if (phase === "ready" && $("#fileList").children.length === 0) loadTree(state.currentPath);
+  const finishedAt = info.operation.finished_at || null;
+  if (["ready", "error"].includes(phase) && ($("#fileList").children.length === 0 || (finishedAt && finishedAt !== state.operationFinishedAt))) {
+    state.operationFinishedAt = finishedAt;
+    loadTree(state.currentPath);
+  }
   if (!state.poll) state.poll = setInterval(refreshStatus, 1000);
 }
 
@@ -278,8 +322,10 @@ async function loadTree(pathId = "", append = false) {
     if (!append) list.innerHTML = data.entries.length ? "" : '<div class="empty-state"><p>此目录为空</p></div>';
     for (const entry of data.entries) {
       const row = document.createElement("div");
-      row.className = "file-row";
-      row.innerHTML = `<span class="file-icon">${entry.kind === "directory" ? "▱" : "◇"}</span><span class="file-name">${escapeHtml(entry.name)}</span><span class="file-size">${entry.kind === "file" ? formatBytes(entry.size) : ""}</span>`;
+      const encrypted = entry.kind === "file" && entry.encrypted === true;
+      row.className = `file-row${entry.kind === "file" && !encrypted ? " unencrypted" : ""}`;
+      const status = entry.kind === "file" ? `<span class="file-status${encrypted ? "" : " plain"}">${encrypted ? "已加密" : "未加密"}</span>` : "<span></span>";
+      row.innerHTML = `<span class="file-icon" aria-hidden="true">${fileIcon(entry)}</span><span class="file-name">${escapeHtml(entry.name)}</span>${status}<span class="file-size">${entry.kind === "file" ? formatBytes(entry.size) : ""}</span>`;
       row.addEventListener("click", () => {
         if (entry.kind === "directory") {
           state.history.push({ id: entry.id, name: entry.name });
@@ -304,21 +350,33 @@ async function loadTree(pathId = "", append = false) {
 
 async function previewFile(entry) {
   clearActivePreview();
-  state.selected = entry;
+  state.selected = entry.encrypted ? entry : null;
   $("#previewTitle").textContent = entry.name;
-  $("#downloadButton").disabled = false;
+  $("#downloadButton").disabled = !entry.encrypted;
   const target = $("#preview");
   target.classList.remove("empty");
+  if (!entry.encrypted) {
+    previewMessage("此文件尚未加密或加密未成功，完成重新扫描前不能预览或下载。", "!", "preview-warning");
+    return;
+  }
   const kind = entry.preview_kind || "unsupported";
   if (["image", "video", "audio", "pdf"].includes(kind)) {
     showNativePreview(entry, kind);
   } else if (SANDBOX_KINDS.has(kind)) {
     previewMessage("正在解密并准备安全预览…", "◇");
     await showSandboxPreview(entry, kind, state.previewRequest);
-  } else if (["doc", "xls", "ppt"].includes(entry.name.split(".").pop().toLowerCase())) {
-    previewMessage("旧版 Office 格式暂不支持网页解析，可使用下载按钮保存。", "⇩");
   } else {
-    previewMessage("此格式没有可用的安全网页预览器，可使用下载按钮保存。", "⇩");
+    const legacy = ["doc", "xls", "ppt"].includes(entry.name.split(".").pop().toLowerCase());
+    previewMessage(
+      legacy ? "旧版 Office 格式暂不支持网页解析，可使用下载按钮保存。" : "此格式没有可用的安全网页预览器，可使用下载按钮保存。",
+      "⇩",
+      "",
+      { label: "尝试以文本打开", handler: async () => {
+        clearActivePreview();
+        previewMessage("正在解密并尝试以 UTF-8 文本打开…", "◇");
+        await showSandboxPreview(entry, "text", state.previewRequest, "无法作为 UTF-8 文本打开");
+      } },
+    );
   }
 }
 
@@ -351,6 +409,24 @@ $("#initForm").addEventListener("submit", async (event) => {
 $("#applyRoot").addEventListener("click", async () => {
   try { await api("/api/root", { method: "PUT", body: { path: $("#rootPath").value } }); await refreshStatus(); }
   catch (error) { showError(error.message); }
+});
+$("#switchRootButton").addEventListener("click", async () => {
+  const path = prompt("输入要打开的保险库绝对路径", state.status?.root || "");
+  if (!path || path === state.status?.root) return;
+  clearActivePreview();
+  try {
+    await api("/api/root", { method: "PUT", body: { path } });
+    state.selected = null;
+    state.currentPath = "";
+    state.nextOffset = 0;
+    state.history = [{ id: "", name: "根目录" }];
+    state.operationFinishedAt = null;
+    $("#fileList").replaceChildren();
+    $("#downloadButton").disabled = true;
+    $("#previewTitle").textContent = "选择文件";
+    previewMessage("从左侧选择文件进行安全预览", "◇");
+    await refreshStatus();
+  } catch (error) { toast(error.message); }
 });
 $("#rescanButton").addEventListener("click", async () => { try { await api("/api/rescan", { method: "POST" }); } catch (error) { toast(error.message); } });
 $("#verifyButton").addEventListener("click", async () => { try { await api("/api/verify", { method: "POST" }); toast("完整校验已开始"); } catch (error) { toast(error.message); } });

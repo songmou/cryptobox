@@ -7,6 +7,7 @@ from cryptobox.crypto import iter_decrypted
 from cryptobox.index import VaultIndex
 from cryptobox.scanner import StatusTracker, scan_and_encrypt
 from cryptobox.vault import VaultManager
+import cryptobox.scanner as scanner_module
 
 
 def test_scan_encrypts_plain_files_and_uses_cache(tmp_path: Path) -> None:
@@ -66,4 +67,22 @@ def test_hardlink_aborts_before_other_plain_files_are_changed(tmp_path: Path) ->
 
     assert result["phase"] == "error"
     assert ordinary.read_bytes() == b"ordinary remains untouched"
+    index.close()
+
+
+def test_current_executable_is_skipped_but_sibling_is_encrypted(tmp_path: Path, monkeypatch) -> None:
+    executable = tmp_path / "cryptobox-test"
+    sibling = tmp_path / "document.txt"
+    executable.write_bytes(b"running application")
+    sibling.write_bytes(b"protect me")
+    monkeypatch.setattr(scanner_module, "current_executable", lambda: executable)
+    session = VaultManager(tmp_path).create("password")
+    index = VaultIndex(session.index_path, session.derive_key(b"index"))
+
+    result = scan_and_encrypt(tmp_path, session, index, StatusTracker())
+
+    assert result["phase"] == "ready"
+    assert executable.read_bytes() == b"running application"
+    assert sibling.read_bytes().startswith(b"CRBOXF01")
+    assert index.get_entry(Path("cryptobox-test")) is None
     index.close()

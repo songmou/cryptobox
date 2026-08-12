@@ -12,7 +12,9 @@ from cryptobox.crypto import encrypt_file
 from cryptobox.index import VaultIndex
 from cryptobox.scanner import StatusTracker, scan_and_encrypt
 from cryptobox.service import RuntimeState
+from cryptobox.settings import load_last_root
 from cryptobox.vault import VaultManager
+import cryptobox.api as api_module
 
 
 def prepared_file_runtime(root: Path, name: str, payload: bytes) -> RuntimeState:
@@ -89,6 +91,11 @@ def test_pdf_content_is_inline_and_same_origin_embeddable(tmp_path: Path) -> Non
         preview_policy = preview_host.headers["content-security-policy"]
         assert "connect-src 'none'" in preview_policy
         assert "frame-ancestors 'self'" in preview_policy
+
+        app_script = client.get("/static/app.js").text
+        assert "switchRootButton" in app_script
+        assert "尝试以文本打开" in app_script
+        assert "FILE_ICONS" in app_script
 
 
 def test_host_and_csrf_are_enforced(tmp_path: Path) -> None:
@@ -197,3 +204,61 @@ def test_web_password_change_rewraps_files_and_rebuilds_index(tmp_path: Path) ->
         tree = client.get("/api/tree").json()
         file_id = tree["entries"][0]["id"]
         assert client.get(f"/api/content/{file_id}").content == payload
+
+
+def test_tree_shows_encrypted_and_plain_files_but_plain_content_is_rejected(tmp_path: Path) -> None:
+    runtime = prepared_file_runtime(tmp_path, "protected.txt", b"protected")
+    plain = tmp_path / "arrived-later.bin"
+    plain.write_bytes(b"not encrypted yet")
+    app = create_app(runtime, "tree-state-token")
+
+    with TestClient(app) as client:
+        client.get("/?token=tree-state-token")
+        entries = {item["name"]: item for item in client.get("/api/tree").json()["entries"]}
+        assert entries["protected.txt"]["encrypted"] is True
+        assert entries["protected.txt"]["size"] == len(b"protected")
+        assert entries["arrived-later.bin"]["encrypted"] is False
+        assert entries["arrived-later.bin"]["size"] == len(b"not encrypted yet")
+        assert client.get(f"/api/content/{entries['arrived-later.bin']['id']}").status_code == 409
+        assert client.get(f"/api/download/{entries['arrived-later.bin']['id']}").status_code == 409
+
+
+def test_change_root_locks_current_vault_and_remembers_new_root(tmp_path: Path) -> None:
+    old_root = tmp_path / "old"
+    new_root = tmp_path / "new"
+    old_root.mkdir()
+    new_root.mkdir()
+    settings = tmp_path / "settings.json"
+    runtime = prepared_file_runtime(old_root, "old.txt", b"old")
+    runtime.settings_path = settings
+    app = create_app(runtime, "switch-token")
+
+    with TestClient(app) as client:
+        client.get("/?token=switch-token")
+        csrf = client.get("/api/status").json()["csrf"]
+        relative = client.put(
+            "/api/root", headers={"X-Cryptobox-CSRF": csrf}, json={"path": "relative/path"}
+        )
+        assert relative.status_code == 400
+        switched = client.put(
+            "/api/root", headers={"X-Cryptobox-CSRF": csrf}, json={"path": str(new_root)}
+        )
+        assert switched.status_code == 200
+        status = client.get("/api/status").json()
+        assert status["root"] == str(new_root.resolve())
+        assert status["unlocked"] is False
+        assert status["initialized"] is False
+        assert load_last_root(settings) == new_root.resolve()
+
+
+def test_tree_hides_current_executable_only(tmp_path: Path, monkeypatch) -> None:
+    runtime = prepared_file_runtime(tmp_path, "visible.txt", b"visible")
+    executable = tmp_path / "cryptobox-running"
+    executable.write_bytes(b"application")
+    monkeypatch.setattr(api_module, "current_executable", lambda: executable)
+    app = create_app(runtime, "executable-token")
+
+    with TestClient(app) as client:
+        client.get("/?token=executable-token")
+        names = {item["name"] for item in client.get("/api/tree").json()["entries"]}
+        assert names == {"visible.txt"}
