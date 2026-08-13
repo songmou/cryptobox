@@ -327,9 +327,15 @@ async function render(message) {
 }
 
 window.addEventListener("message", async (event) => {
-  if (event.source !== window.parent || event.data?.type !== "cryptobox-preview") return;
+  if (event.source !== window.parent) return;
+  if (event.data?.type === "cryptobox-preview-theme") {
+    document.documentElement.dataset.theme = event.data.theme === "dark" ? "dark" : "light";
+    return;
+  }
+  if (event.data?.type !== "cryptobox-preview") return;
   const { requestId } = event.data;
   try {
+    document.documentElement.dataset.theme = event.data.theme === "dark" ? "dark" : "light";
     await render(event.data);
     window.parent.postMessage({ type: "cryptobox-preview-complete", requestId }, "*");
   } catch (error) {

@@ -15,7 +15,7 @@ from cryptobox.crypto import encrypt_file
 from cryptobox.index import VaultIndex
 from cryptobox.scanner import StatusTracker, scan_and_encrypt
 from cryptobox.service import RuntimeState
-from cryptobox.settings import load_last_root
+from cryptobox.settings import load_last_root, load_settings, save_last_root
 from cryptobox.vault import VaultManager
 import cryptobox.api as api_module
 import cryptobox
@@ -305,6 +305,7 @@ def test_change_root_locks_current_vault_and_remembers_new_root(tmp_path: Path) 
     settings = tmp_path / "settings.json"
     runtime = prepared_file_runtime(old_root, "old.txt", b"old")
     runtime.settings_path = settings
+    save_last_root(settings, old_root)
     app = create_app(runtime, "switch-token")
 
     with TestClient(app) as client:
@@ -323,6 +324,56 @@ def test_change_root_locks_current_vault_and_remembers_new_root(tmp_path: Path) 
         assert status["unlocked"] is False
         assert status["initialized"] is False
         assert load_last_root(settings) == new_root.resolve()
+
+
+def test_settings_api_validates_and_preserves_preferences_across_root_change(tmp_path: Path) -> None:
+    old_root = tmp_path / "old-settings-root"
+    new_root = tmp_path / "new-settings-root"
+    old_root.mkdir()
+    new_root.mkdir()
+    settings_path = tmp_path / "settings.json"
+    save_last_root(settings_path, old_root)
+    runtime = RuntimeState(old_root, settings_path=settings_path)
+    app = create_app(runtime, "settings-token")
+
+    with TestClient(app) as client:
+        client.get("/?token=settings-token")
+        status = client.get("/api/status").json()
+        csrf = status["csrf"]
+        assert client.get("/api/settings").json() == {
+            "root": str(old_root.resolve()),
+            "auto_lock_minutes": 3,
+            "theme": "system",
+        }
+        assert client.put(
+            "/api/settings",
+            headers={"X-Cryptobox-CSRF": csrf},
+            json={"auto_lock_minutes": 20, "theme": "dark"},
+        ).json()["theme"] == "dark"
+        assert client.put(
+            "/api/settings",
+            headers={"X-Cryptobox-CSRF": csrf},
+            json={"auto_lock_minutes": 0, "theme": "dark"},
+        ).status_code == 422
+        assert client.put(
+            "/api/settings",
+            headers={"X-Cryptobox-CSRF": csrf},
+            json={"auto_lock_minutes": 3, "theme": "neon"},
+        ).status_code == 422
+        assert client.put(
+            "/api/settings",
+            json={"auto_lock_minutes": 3, "theme": "light"},
+        ).status_code == 403
+        assert client.put(
+            "/api/root",
+            headers={"X-Cryptobox-CSRF": csrf},
+            json={"path": str(new_root)},
+        ).status_code == 200
+
+    stored = load_settings(settings_path)
+    assert stored.last_root == new_root.resolve()
+    assert stored.auto_lock_minutes == 20
+    assert stored.theme == "dark"
 
 
 def test_tree_hides_current_executable_only(tmp_path: Path, monkeypatch) -> None:

@@ -21,6 +21,7 @@ from .crypto import iter_decrypted, read_header_path
 from .errors import CryptoboxError, InvalidPassword, UnsafePath
 from .scanner import iter_regular_files, preview_root
 from .service import RuntimeState
+from .settings import AppSettings, load_settings, save_preferences
 from . import __version__
 from .preview import content_media_type, preview_kind
 from .util import (
@@ -51,6 +52,11 @@ class PasswordRequest(BaseModel):
 
 class RootRequest(BaseModel):
     path: str
+
+
+class SettingsRequest(BaseModel):
+    auto_lock_minutes: int = Field(ge=1, le=120)
+    theme: str
 
 
 class ZipRequest(BaseModel):
@@ -168,6 +174,41 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
             "root": str(runtime.root),
             "operation": runtime.tracker.snapshot(),
             "csrf": csrf_token,
+        }
+
+    def current_settings() -> AppSettings:
+        if runtime.settings_path is None:
+            return AppSettings(last_root=runtime.root)
+        return load_settings(runtime.settings_path)
+
+    @app.get("/api/settings", dependencies=[Depends(require_session)])
+    async def get_settings() -> dict[str, object]:
+        settings = current_settings()
+        return {
+            "root": str(runtime.root),
+            "auto_lock_minutes": settings.auto_lock_minutes,
+            "theme": settings.theme,
+        }
+
+    @app.put("/api/settings", dependencies=[Depends(require_csrf)])
+    async def update_settings(payload: SettingsRequest) -> dict[str, object]:
+        if payload.theme not in {"system", "light", "dark"}:
+            raise HTTPException(status_code=422, detail="Theme must be system, light, or dark")
+        if runtime.settings_path is None:
+            raise HTTPException(status_code=503, detail="Settings storage is unavailable")
+        try:
+            settings = await asyncio.to_thread(
+                save_preferences,
+                runtime.settings_path,
+                auto_lock_minutes=payload.auto_lock_minutes,
+                theme=payload.theme,
+            )
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "root": str(runtime.root),
+            "auto_lock_minutes": settings.auto_lock_minutes,
+            "theme": settings.theme,
         }
 
     @app.get("/api/init/preview", dependencies=[Depends(require_session)])

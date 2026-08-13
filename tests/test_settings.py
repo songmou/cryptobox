@@ -4,7 +4,15 @@ import json
 from pathlib import Path
 
 from cryptobox.main import parse_args, select_root
-from cryptobox.settings import load_last_root, save_last_root, settings_path
+from cryptobox.settings import (
+    DEFAULT_AUTO_LOCK_MINUTES,
+    DEFAULT_THEME,
+    load_last_root,
+    load_settings,
+    save_last_root,
+    save_preferences,
+    settings_path,
+)
 import cryptobox.settings as settings_module
 
 
@@ -20,6 +28,49 @@ def test_settings_round_trip_and_invalid_values_fall_back(tmp_path: Path) -> Non
     assert load_last_root(config) is None
     config.write_text(json.dumps({"last_root": str(tmp_path / "missing")}), encoding="utf-8")
     assert load_last_root(config) is None
+
+
+def test_preferences_default_migrate_validate_and_preserve_root(tmp_path: Path) -> None:
+    config = tmp_path / "config" / "settings.json"
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    config.parent.mkdir()
+    config.write_text(json.dumps({"last_root": str(vault)}), encoding="utf-8")
+
+    legacy = load_settings(config)
+    assert legacy.last_root == vault.resolve()
+    assert legacy.auto_lock_minutes == DEFAULT_AUTO_LOCK_MINUTES
+    assert legacy.theme == DEFAULT_THEME
+
+    updated = save_preferences(config, auto_lock_minutes=15, theme="light")
+    assert updated.last_root == vault.resolve()
+    save_last_root(config, vault)
+    assert load_settings(config) == updated
+
+    config.write_text(
+        json.dumps({"last_root": str(vault), "auto_lock_minutes": 0, "theme": "neon"}),
+        encoding="utf-8",
+    )
+    invalid = load_settings(config)
+    assert invalid.auto_lock_minutes == DEFAULT_AUTO_LOCK_MINUTES
+    assert invalid.theme == DEFAULT_THEME
+
+
+def test_preferences_reject_out_of_range_values(tmp_path: Path) -> None:
+    config = tmp_path / "settings.json"
+    for value in (0, 121):
+        try:
+            save_preferences(config, auto_lock_minutes=value, theme="system")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Invalid auto-lock value was accepted")
+    try:
+        save_preferences(config, auto_lock_minutes=3, theme="neon")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Invalid theme was accepted")
 
 
 def test_explicit_root_wins_then_remembered_root_then_cwd(tmp_path: Path) -> None:

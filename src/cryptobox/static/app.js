@@ -2,20 +2,28 @@ const $ = (selector) => document.querySelector(selector);
 const state = {
   csrf: "",
   status: null,
-  currentPath: "",
-  nextOffset: 0,
-  history: [{ id: "", name: "根目录" }],
+  settings: { auto_lock_minutes: 3, theme: "system" },
   selected: null,
+  selectedDirectory: "",
+  treeNodes: new Map(),
   poll: null,
   previewController: null,
   previewCleanup: null,
   previewRequest: 0,
   operationFinishedAt: null,
+  drawerOpen: false,
+  lastActivity: Date.now(),
+  activityTimer: null,
+  mediaPlaying: false,
+  locking: false,
+  lockReason: "",
 };
 
 const TEXT_PREVIEW_LIMIT = 5 * 1024 * 1024;
 const DOCUMENT_PREVIEW_LIMIT = 50 * 1024 * 1024;
 const SANDBOX_KINDS = new Set(["text", "unknown", "markdown", "table", "html", "svg", "word", "spreadsheet", "presentation", "ebook", "archive"]);
+const ZOOM_MIN = 0.1;
+const ZOOM_MAX = 8;
 
 function formatBytes(value = 0) {
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -34,6 +42,7 @@ function clearActivePreview() {
   if (state.previewCleanup) state.previewCleanup();
   state.previewController = null;
   state.previewCleanup = null;
+  state.mediaPlaying = false;
 }
 
 function previewMessage(message, symbol = "⇩", kind = "", action = null) {
@@ -91,30 +100,159 @@ function contentUrl(entry) {
   return `/api/content/${encodeURIComponent(entry.id)}`;
 }
 
-function showNativePreview(entry, kind) {
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function showMediaPreview(entry, kind) {
   const target = $("#preview");
-  const url = contentUrl(entry);
-  let node;
-  if (kind === "image") {
-    node = document.createElement("img");
-    node.alt = entry.name;
-  } else if (kind === "video") {
-    node = document.createElement("video");
-    node.controls = true;
-    node.preload = "metadata";
-  } else if (kind === "audio") {
-    node = document.createElement("audio");
-    node.controls = true;
-    node.preload = "metadata";
-  } else {
-    node = document.createElement("iframe");
-    node.title = entry.name;
+  const shell = document.createElement("section");
+  shell.className = "media-shell";
+  const toolbar = document.createElement("div");
+  toolbar.className = "media-toolbar";
+  toolbar.innerHTML = `
+    <button type="button" data-action="out" aria-label="缩小">−</button>
+    <button type="button" data-action="in" aria-label="放大">＋</button>
+    <button type="button" data-action="fit">适应窗口</button>
+    <button type="button" data-action="actual">100%</button>
+    <span class="zoom-label" aria-live="polite">100%</span>
+    <button type="button" data-action="fullscreen">全屏</button>`;
+  const stage = document.createElement("div");
+  stage.className = "media-stage";
+  const media = document.createElement(kind === "image" ? "img" : "video");
+  media.className = "zoom-media";
+  media.alt = kind === "image" ? entry.name : "";
+  media.draggable = false;
+  if (kind === "video") {
+    media.controls = true;
+    media.preload = "metadata";
+    media.setAttribute("playsinline", "");
   }
-  node.addEventListener("error", () => {
-    previewMessage("浏览器无法解码此文件或媒体编码，可使用下载按钮保存后查看。", "!", "preview-warning");
-  }, { once: true });
-  node.src = url;
+  stage.appendChild(media);
+  shell.append(toolbar, stage);
+  target.replaceChildren(shell);
+
+  let naturalWidth = 1, naturalHeight = 1, scale = 1, fitScale = 1, panX = 0, panY = 0;
+  const pointers = new Map();
+  let dragStart = null, pinchStart = null, resizeObserver = null;
+  const label = toolbar.querySelector(".zoom-label");
+
+  const applyTransform = () => {
+    scale = clamp(scale, ZOOM_MIN, ZOOM_MAX);
+    media.style.transform = `translate(-50%, -50%) translate(${panX}px, ${panY}px) scale(${scale})`;
+    label.textContent = `${Math.round(scale * 100)}%`;
+    stage.classList.toggle("can-pan", scale > fitScale + 0.001);
+  };
+  const fit = () => {
+    const rect = stage.getBoundingClientRect();
+    if (!rect.width || !rect.height || !naturalWidth || !naturalHeight) return;
+    fitScale = clamp(Math.min((rect.width - 24) / naturalWidth, (rect.height - 24) / naturalHeight, 1), ZOOM_MIN, ZOOM_MAX);
+    scale = fitScale;
+    panX = panY = 0;
+    applyTransform();
+  };
+  const zoomBy = (factor) => {
+    scale = clamp(scale * factor, ZOOM_MIN, ZOOM_MAX);
+    if (scale <= fitScale) panX = panY = 0;
+    applyTransform();
+  };
+  const ready = () => {
+    naturalWidth = kind === "image" ? media.naturalWidth : media.videoWidth;
+    naturalHeight = kind === "image" ? media.naturalHeight : media.videoHeight;
+    fit();
+  };
+
+  media.addEventListener(kind === "image" ? "load" : "loadedmetadata", ready, { once: true });
+  media.addEventListener("error", () => previewMessage("浏览器无法解码此文件或媒体编码，可使用下载按钮保存后查看。", "!", "preview-warning"), { once: true });
+  if (kind === "video") {
+    media.addEventListener("play", () => { state.mediaPlaying = true; recordActivity(); });
+    for (const event of ["pause", "ended", "error", "emptied"]) media.addEventListener(event, () => { state.mediaPlaying = false; recordActivity(); });
+  }
+
+  toolbar.addEventListener("click", async (event) => {
+    const action = event.target.closest("button")?.dataset.action;
+    if (action === "out") zoomBy(0.8);
+    if (action === "in") zoomBy(1.25);
+    if (action === "fit") fit();
+    if (action === "actual") { scale = 1; panX = panY = 0; applyTransform(); }
+    if (action === "fullscreen") {
+      try {
+        if (document.fullscreenElement === shell) await document.exitFullscreen();
+        else if (shell.requestFullscreen) await shell.requestFullscreen();
+        else toast("当前浏览器不支持全屏预览");
+      } catch (_) { toast("无法进入全屏预览"); }
+    }
+  });
+  stage.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    zoomBy(event.deltaY < 0 ? 1.12 : 1 / 1.12);
+  }, { passive: false });
+  stage.addEventListener("pointerdown", (event) => {
+    if (kind === "video" && event.target === media) {
+      const mediaRect = media.getBoundingClientRect();
+      if (event.clientY >= mediaRect.bottom - 58) return;
+    }
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    stage.setPointerCapture(event.pointerId);
+    if (pointers.size === 1) dragStart = { x: event.clientX, y: event.clientY, panX, panY };
+    if (pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      pinchStart = { distance: Math.hypot(a.x - b.x, a.y - b.y), scale };
+    }
+  });
+  stage.addEventListener("pointermove", (event) => {
+    if (!pointers.has(event.pointerId)) return;
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pointers.size === 2 && pinchStart) {
+      const [a, b] = [...pointers.values()];
+      scale = clamp(pinchStart.scale * Math.hypot(a.x - b.x, a.y - b.y) / Math.max(1, pinchStart.distance), ZOOM_MIN, ZOOM_MAX);
+      applyTransform();
+    } else if (pointers.size === 1 && dragStart && scale > fitScale) {
+      panX = dragStart.panX + event.clientX - dragStart.x;
+      panY = dragStart.panY + event.clientY - dragStart.y;
+      applyTransform();
+    }
+  });
+  const releasePointer = (event) => {
+    pointers.delete(event.pointerId);
+    if (pointers.size < 2) pinchStart = null;
+    if (pointers.size === 0) dragStart = null;
+  };
+  stage.addEventListener("pointerup", releasePointer);
+  stage.addEventListener("pointercancel", releasePointer);
+  const fullscreenChange = () => { if (!document.fullscreenElement) requestAnimationFrame(fit); };
+  document.addEventListener("fullscreenchange", fullscreenChange);
+  resizeObserver = new ResizeObserver(() => { if (Math.abs(scale - fitScale) < 0.001) fit(); });
+  resizeObserver.observe(stage);
+  media.src = contentUrl(entry);
+  state.previewCleanup = () => {
+    state.mediaPlaying = false;
+    resizeObserver?.disconnect();
+    document.removeEventListener("fullscreenchange", fullscreenChange);
+    media.pause?.();
+    media.removeAttribute("src");
+    media.load?.();
+  };
+}
+
+function showNativePreview(entry, kind) {
+  if (["image", "video"].includes(kind)) return showMediaPreview(entry, kind);
+  const target = $("#preview");
+  const node = document.createElement(kind === "audio" ? "audio" : "iframe");
+  if (kind === "audio") {
+    node.controls = true;
+    node.preload = "metadata";
+    node.addEventListener("play", () => { state.mediaPlaying = true; recordActivity(); });
+    for (const event of ["pause", "ended", "error", "emptied"]) node.addEventListener(event, () => { state.mediaPlaying = false; recordActivity(); });
+  } else node.title = entry.name;
+  node.addEventListener("error", () => previewMessage("浏览器无法解码此文件或媒体编码，可使用下载按钮保存后查看。", "!", "preview-warning"), { once: true });
+  node.src = contentUrl(entry);
   target.replaceChildren(node);
+  state.previewCleanup = () => {
+    state.mediaPlaying = false;
+    if (kind === "audio") { node.pause(); node.removeAttribute("src"); node.load(); }
+    else node.src = "about:blank";
+  };
 }
 
 function createSandboxFrame(requestId, errorPrefix = "无法预览") {
@@ -124,49 +262,29 @@ function createSandboxFrame(requestId, errorPrefix = "无法预览") {
   frame.className = "sandbox-preview";
   frame.setAttribute("sandbox", "allow-scripts");
   frame.src = "/static/preview-host.html";
-
-  let readyResolve;
-  let readyReject;
-  const ready = new Promise((resolve, reject) => {
-    readyResolve = resolve;
-    readyReject = reject;
-  });
+  let readyResolve, readyReject;
+  const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
   const timeout = setTimeout(() => readyReject(new Error("安全预览器加载超时")), 20000);
   const onMessage = (event) => {
     if (event.source !== frame.contentWindow) return;
-    if (event.data?.type === "cryptobox-preview-ready") {
-      clearTimeout(timeout);
-      readyResolve();
-    } else if (event.data?.requestId === requestId && event.data?.type === "cryptobox-preview-error") {
-      previewMessage(`${errorPrefix}：${event.data.message || "文件解析失败"}`, "!", "preview-warning");
-    }
+    if (event.data?.type === "cryptobox-preview-ready") { clearTimeout(timeout); readyResolve(); }
+    else if (event.data?.requestId === requestId && event.data?.type === "cryptobox-preview-error") previewMessage(`${errorPrefix}：${event.data.message || "文件解析失败"}`, "!", "preview-warning");
   };
   window.addEventListener("message", onMessage);
-  state.previewCleanup = () => {
-    clearTimeout(timeout);
-    window.removeEventListener("message", onMessage);
-    frame.src = "about:blank";
-  };
+  state.previewCleanup = () => { clearTimeout(timeout); window.removeEventListener("message", onMessage); frame.src = "about:blank"; };
   target.replaceChildren(frame);
   return { frame, ready };
 }
 
 async function showSandboxPreview(entry, kind, requestId, errorPrefix = "无法预览") {
-  const limit = ["text", "unknown", "markdown", "table", "html", "svg"].includes(kind)
-    ? TEXT_PREVIEW_LIMIT
-    : DOCUMENT_PREVIEW_LIMIT;
+  const limit = ["text", "unknown", "markdown", "table", "html", "svg"].includes(kind) ? TEXT_PREVIEW_LIMIT : DOCUMENT_PREVIEW_LIMIT;
   if (entry.size > limit) {
-    const label = limit === TEXT_PREVIEW_LIMIT ? "5 MB" : "50 MB";
-    previewMessage(`文件超过 ${label} 的安全预览上限，可使用下载按钮保存。`, "⇩", "preview-warning");
+    previewMessage(`文件超过 ${limit === TEXT_PREVIEW_LIMIT ? "5 MB" : "50 MB"} 的安全预览上限，可使用下载按钮保存。`, "⇩", "preview-warning");
     return;
   }
-
   const { frame, ready } = createSandboxFrame(requestId, errorPrefix);
   state.previewController = new AbortController();
-  const responsePromise = fetch(contentUrl(entry), {
-    credentials: "same-origin",
-    signal: state.previewController.signal,
-  }).then(async (response) => {
+  const responsePromise = fetch(contentUrl(entry), { credentials: "same-origin", signal: state.previewController.signal }).then(async (response) => {
     if (!response.ok) {
       let message = `${response.status} ${response.statusText}`;
       try { message = (await response.json()).detail || message; } catch (_) {}
@@ -174,17 +292,13 @@ async function showSandboxPreview(entry, kind, requestId, errorPrefix = "无法�
     }
     return response.arrayBuffer();
   });
-
   try {
     const [buffer] = await Promise.all([responsePromise, ready]);
     if (requestId !== state.previewRequest || !frame.contentWindow) return;
     frame.contentWindow.postMessage({
-      type: "cryptobox-preview",
-      requestId,
-      kind,
-      name: entry.name,
-      mediaType: entry.media_type || "application/octet-stream",
-      buffer,
+      type: "cryptobox-preview", requestId, kind, name: entry.name,
+      mediaType: entry.media_type || "application/octet-stream", buffer,
+      theme: resolvedTheme(),
     }, "*", [buffer]);
   } catch (error) {
     if (error.name === "AbortError" || requestId !== state.previewRequest) return;
@@ -195,10 +309,7 @@ async function showSandboxPreview(entry, kind, requestId, errorPrefix = "无法�
 async function api(url, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (state.csrf && options.method && options.method !== "GET") headers["X-Cryptobox-CSRF"] = state.csrf;
-  if (options.body && typeof options.body !== "string") {
-    headers["Content-Type"] = "application/json";
-    options.body = JSON.stringify(options.body);
-  }
+  if (options.body && typeof options.body !== "string") { headers["Content-Type"] = "application/json"; options.body = JSON.stringify(options.body); }
   const response = await fetch(url, { credentials: "same-origin", ...options, headers });
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
@@ -209,11 +320,13 @@ async function api(url, options = {}) {
   return type.includes("application/json") ? response.json() : response;
 }
 
+let toastTimer;
 function toast(message) {
   const node = $("#toast");
   node.textContent = message;
   node.classList.remove("hidden");
-  setTimeout(() => node.classList.add("hidden"), 3600);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => node.classList.add("hidden"), 3600);
 }
 
 function showError(message) {
@@ -228,6 +341,30 @@ function setStatusPill(label, kind = "") {
   node.querySelector("span").textContent = label;
 }
 
+function resolvedTheme() {
+  if (state.settings.theme !== "system") return state.settings.theme;
+  return matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+}
+
+function applyTheme(theme = state.settings.theme) {
+  state.settings.theme = theme;
+  document.documentElement.dataset.theme = resolvedTheme();
+  const frame = document.querySelector("#preview iframe.sandbox-preview");
+  if (frame?.contentWindow) frame.contentWindow.postMessage({ type: "cryptobox-preview-theme", theme: resolvedTheme() }, "*");
+}
+
+async function loadSettings() {
+  try {
+    const settings = await api("/api/settings");
+    state.settings = settings;
+    applyTheme(settings.theme);
+    $("#settingsRoot").textContent = settings.root;
+    $("#autoLockMinutes").value = settings.auto_lock_minutes;
+    const radio = document.querySelector(`input[name="theme"][value="${settings.theme}"]`);
+    if (radio) radio.checked = true;
+  } catch (_) { applyTheme(); }
+}
+
 async function refreshStatus() {
   try {
     const info = await api("/api/status");
@@ -235,6 +372,8 @@ async function refreshStatus() {
     state.csrf = info.csrf;
     $("#rootPath").value = info.root;
     $("#rootLabel").textContent = info.root;
+    $("#settingsRoot").textContent = info.root;
+    if (state.locking) return info;
     if (!info.initialized) showInit();
     else if (!info.unlocked) showUnlock();
     else showWorkspace(info);
@@ -247,10 +386,12 @@ async function refreshStatus() {
 }
 
 function showInit() {
+  closeDrawer();
   $("#workspace").classList.add("hidden");
   $("#accessView").classList.remove("hidden");
   $("#unlockForm").classList.add("hidden");
   $("#initForm").classList.remove("hidden");
+  $("#lockNotice").classList.add("hidden");
   $("#accessTitle").textContent = "创建本机保险库";
   $("#accessDescription").textContent = "确认目录后，Cryptobox 会原子加密其中的普通文件。";
   setStatusPill("等待初始化");
@@ -258,12 +399,16 @@ function showInit() {
 }
 
 function showUnlock() {
+  closeDrawer();
   $("#workspace").classList.add("hidden");
   $("#accessView").classList.remove("hidden");
   $("#initForm").classList.add("hidden");
   $("#unlockForm").classList.remove("hidden");
   $("#accessTitle").textContent = "解锁你的文件";
   $("#accessDescription").textContent = "密码只用于本机解锁，不会保存到磁盘。";
+  const notice = $("#lockNotice");
+  if (state.lockReason) { notice.textContent = state.lockReason; notice.classList.remove("hidden"); state.lockReason = ""; }
+  else notice.classList.add("hidden");
   setStatusPill("已锁定");
 }
 
@@ -273,9 +418,9 @@ function showWorkspace(info) {
   const phase = info.operation.phase;
   setStatusPill(phase === "ready" ? "已保护" : phase === "error" ? "需要处理" : "正在处理", phase === "ready" ? "ready" : phase === "error" ? "error" : "");
   const finishedAt = info.operation.finished_at || null;
-  if (["ready", "error"].includes(phase) && ($("#fileList").children.length === 0 || (finishedAt && finishedAt !== state.operationFinishedAt))) {
+  if (!state.treeNodes.size || (finishedAt && finishedAt !== state.operationFinishedAt)) {
     state.operationFinishedAt = finishedAt;
-    loadTree(state.currentPath);
+    refreshTreePreservingExpansion();
   }
   if (!state.poll) state.poll = setInterval(refreshStatus, 1000);
 }
@@ -289,63 +434,150 @@ async function loadPreview() {
 
 function renderOperation(operation) {
   const panel = $("#operationPanel");
-  if (!["scanning", "encrypting", "verifying", "error"].includes(operation.phase)) {
-    panel.classList.add("hidden");
-    return;
-  }
+  if (!state.locking && !["scanning", "encrypting", "verifying", "error"].includes(operation.phase)) { panel.classList.add("hidden"); return; }
   panel.classList.remove("hidden");
   const labels = { scanning: "正在扫描目录", encrypting: "正在原子加密", verifying: "正在完整校验", error: "处理完成，但存在错误" };
-  $("#operationText").textContent = labels[operation.phase] || operation.phase;
+  $("#operationText").textContent = state.locking ? "正在安全锁定，请稍候" : (labels[operation.phase] || operation.phase);
   $("#operationCount").textContent = `${operation.processed_files || 0} / ${operation.total_files || 0}`;
   const ratio = operation.total_files ? (operation.processed_files / operation.total_files) * 100 : 0;
   $("#progressBar").style.width = `${Math.min(100, ratio)}%`;
   $("#operationErrors").innerHTML = (operation.errors || []).slice(-5).map((item) => `<div>${escapeHtml(item)}</div>`).join("");
 }
 
-function renderBreadcrumbs() {
-  $("#breadcrumbs").innerHTML = state.history.map((item, index) => `<button data-index="${index}">${escapeHtml(item.name)}</button>`).join("<span>/</span>");
-  $("#breadcrumbs").querySelectorAll("button").forEach((button) => button.addEventListener("click", () => {
-    const index = Number(button.dataset.index);
-    state.history = state.history.slice(0, index + 1);
-    loadTree(state.history[index].id);
-  }));
+function makeTreeNode(id, name, parentId = null, depth = 0) {
+  return { id, name, parentId, depth, expanded: id === "", loaded: false, loading: false, entries: [], nextOffset: 0, hasMore: false, error: "" };
 }
 
-async function loadTree(pathId = "", append = false) {
+async function loadTreeNode(id = "", append = false) {
+  let node = state.treeNodes.get(id);
+  if (!node) {
+    node = makeTreeNode(id, id ? "文件夹" : "根目录");
+    state.treeNodes.set(id, node);
+  }
+  if (node.loading) return;
+  node.loading = true;
+  node.error = "";
+  renderTree();
   try {
-    const offset = append ? state.nextOffset : 0;
-    const data = await api(`/api/tree?path_id=${encodeURIComponent(pathId)}&offset=${offset}&limit=500`);
-    state.currentPath = pathId;
-    state.nextOffset = data.next_offset;
-    renderBreadcrumbs();
-    const list = $("#fileList");
-    if (!append) list.innerHTML = data.entries.length ? "" : '<div class="empty-state"><p>此目录为空</p></div>';
+    const offset = append ? node.nextOffset : 0;
+    const data = await api(`/api/tree?path_id=${encodeURIComponent(id)}&offset=${offset}&limit=500`);
+    node.entries = append ? node.entries.concat(data.entries) : data.entries;
+    node.nextOffset = data.next_offset;
+    node.hasMore = data.has_more;
+    node.loaded = true;
     for (const entry of data.entries) {
-      const row = document.createElement("div");
-      const encrypted = entry.kind === "file" && entry.encrypted === true;
-      row.className = `file-row${entry.kind === "file" && !encrypted ? " unencrypted" : ""}`;
-      const status = entry.kind === "file" ? `<span class="file-status${encrypted ? "" : " plain"}">${encrypted ? "已加密" : "未加密"}</span>` : "<span></span>";
-      row.innerHTML = `<span class="file-icon" aria-hidden="true">${fileIcon(entry)}</span><span class="file-name">${escapeHtml(entry.name)}</span>${status}<span class="file-size">${entry.kind === "file" ? formatBytes(entry.size) : ""}</span>`;
-      row.addEventListener("click", () => {
-        if (entry.kind === "directory") {
-          state.history.push({ id: entry.id, name: entry.name });
-          loadTree(entry.id);
-        } else {
-          document.querySelectorAll(".file-row").forEach((node) => node.classList.remove("active"));
-          row.classList.add("active");
-          previewFile(entry);
-        }
-      });
-      list.appendChild(row);
+      if (entry.kind === "directory") {
+        const existing = state.treeNodes.get(entry.id);
+        if (existing) { existing.name = entry.name; existing.parentId = id; existing.depth = node.depth + 1; }
+        else state.treeNodes.set(entry.id, makeTreeNode(entry.id, entry.name, id, node.depth + 1));
+      }
     }
-    if (data.has_more) {
-      const more = document.createElement("button");
-      more.className = "secondary load-more";
-      more.textContent = "加载更多";
-      more.addEventListener("click", () => { more.remove(); loadTree(pathId, true); });
-      list.appendChild(more);
+  } catch (error) { node.error = error.message; }
+  finally { node.loading = false; renderTree(); }
+}
+
+function renderTreeEntries(node, container) {
+  for (const entry of node.entries) {
+    const row = document.createElement("div");
+    const encrypted = entry.kind === "file" && entry.encrypted === true;
+    row.className = `tree-row${entry.kind === "file" && !encrypted ? " unencrypted" : ""}${state.selected?.id === entry.id || (entry.kind === "directory" && state.selectedDirectory === entry.id) ? " active" : ""}`;
+    row.style.setProperty("--depth", node.depth + 1);
+    row.setAttribute("role", "treeitem");
+    row.tabIndex = 0;
+    row.dataset.id = entry.id;
+    row.dataset.kind = entry.kind;
+    if (entry.kind === "directory") {
+      const child = state.treeNodes.get(entry.id);
+      row.setAttribute("aria-expanded", String(Boolean(child?.expanded)));
+      row.innerHTML = `<button class="tree-toggle" type="button" aria-label="${child?.expanded ? "收起" : "展开"} ${escapeHtml(entry.name)}">${child?.expanded ? "⌄" : "›"}</button><span class="file-icon" aria-hidden="true">${fileIcon(entry)}</span><button class="tree-name" type="button">${escapeHtml(entry.name)}</button><span></span>`;
+      row.querySelector(".tree-toggle").addEventListener("click", () => toggleDirectory(entry.id));
+      row.querySelector(".tree-name").addEventListener("click", () => selectDirectory(entry.id));
+    } else {
+      const status = encrypted ? "" : '<span class="file-status plain">未加密</span>';
+      row.innerHTML = `<span class="tree-spacer"></span><span class="file-icon" aria-hidden="true">${fileIcon(entry)}</span><button class="tree-name" type="button">${escapeHtml(entry.name)}</button><span class="file-meta">${status}<span class="file-size">${formatBytes(entry.size)}</span></span>`;
+      row.querySelector(".tree-name").addEventListener("click", () => { previewFile(entry); closeDrawerOnMobile(); });
     }
-  } catch (error) { toast(error.message); }
+    row.addEventListener("keydown", (event) => handleTreeKey(event, entry));
+    container.appendChild(row);
+    if (entry.kind === "directory") {
+      const child = state.treeNodes.get(entry.id);
+      if (child?.expanded) {
+        if (child.loading) appendTreeMessage(container, child.depth + 1, "正在加载…");
+        else if (child.error) appendTreeMessage(container, child.depth + 1, child.error, true);
+        else if (child.loaded && !child.entries.length) appendTreeMessage(container, child.depth + 1, "空文件夹");
+        if (child.loaded) renderTreeEntries(child, container);
+      }
+    }
+  }
+  if (node.hasMore) {
+    const more = document.createElement("button");
+    more.className = "secondary tree-more";
+    more.style.setProperty("--depth", node.depth + 1);
+    more.textContent = "加载更多";
+    more.addEventListener("click", () => loadTreeNode(node.id, true));
+    container.appendChild(more);
+  }
+}
+
+function appendTreeMessage(container, depth, message, error = false) {
+  const row = document.createElement("div");
+  row.className = `tree-message${error ? " error-text" : ""}`;
+  row.style.setProperty("--depth", depth);
+  row.textContent = message;
+  container.appendChild(row);
+}
+
+function renderTree() {
+  const tree = $("#fileTree");
+  tree.replaceChildren();
+  const root = state.treeNodes.get("");
+  if (!root) return;
+  const rootRow = document.createElement("div");
+  rootRow.className = `tree-row root-row${state.selectedDirectory === "" ? " active" : ""}`;
+  rootRow.setAttribute("role", "treeitem");
+  rootRow.setAttribute("aria-expanded", "true");
+  rootRow.tabIndex = 0;
+  rootRow.innerHTML = `<span class="tree-toggle fixed">⌄</span><span class="file-icon">${FILE_ICONS.directory}</span><button class="tree-name" type="button">根目录</button><span></span>`;
+  rootRow.querySelector(".tree-name").addEventListener("click", () => selectDirectory(""));
+  tree.appendChild(rootRow);
+  if (root.loading) appendTreeMessage(tree, 1, "正在加载…");
+  else if (root.error) appendTreeMessage(tree, 1, root.error, true);
+  else if (root.loaded && !root.entries.length) appendTreeMessage(tree, 1, "此目录为空");
+  if (root.loaded) renderTreeEntries(root, tree);
+}
+
+async function toggleDirectory(id, force = null) {
+  const node = state.treeNodes.get(id);
+  if (!node) return;
+  node.expanded = force === null ? !node.expanded : force;
+  renderTree();
+  if (node.expanded && !node.loaded) await loadTreeNode(id);
+}
+
+function selectDirectory(id) {
+  state.selectedDirectory = id;
+  renderTree();
+}
+
+function handleTreeKey(event, entry) {
+  const rows = [...document.querySelectorAll("#fileTree .tree-row")];
+  const index = rows.indexOf(event.currentTarget);
+  if (event.key === "ArrowDown") { event.preventDefault(); rows[index + 1]?.focus(); }
+  else if (event.key === "ArrowUp") { event.preventDefault(); rows[index - 1]?.focus(); }
+  else if (event.key === "ArrowRight" && entry.kind === "directory") { event.preventDefault(); toggleDirectory(entry.id, true); }
+  else if (event.key === "ArrowLeft" && entry.kind === "directory") { event.preventDefault(); toggleDirectory(entry.id, false); }
+  else if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    if (entry.kind === "directory") selectDirectory(entry.id);
+    else { previewFile(entry); closeDrawerOnMobile(); }
+  }
+}
+
+async function refreshTreePreservingExpansion() {
+  const expanded = [...state.treeNodes.values()].filter((node) => node.expanded && node.id).sort((a, b) => a.depth - b.depth).map((node) => node.id);
+  state.treeNodes = new Map([["", makeTreeNode("", "根目录")]]);
+  await loadTreeNode("");
+  for (const id of expanded) if (state.treeNodes.has(id)) await toggleDirectory(id, true);
 }
 
 async function previewFile(entry) {
@@ -353,31 +585,123 @@ async function previewFile(entry) {
   state.selected = entry.encrypted ? entry : null;
   $("#previewTitle").textContent = entry.name;
   $("#downloadButton").disabled = !entry.encrypted;
-  const target = $("#preview");
-  target.classList.remove("empty");
+  $("#preview").classList.remove("empty");
+  renderTree();
   if (!entry.encrypted) {
     previewMessage("此文件尚未加密或加密未成功，完成重新扫描前不能预览或下载。", "!", "preview-warning");
     return;
   }
   const kind = entry.preview_kind || "unsupported";
-  if (["image", "video", "audio", "pdf"].includes(kind)) {
-    showNativePreview(entry, kind);
-  } else if (SANDBOX_KINDS.has(kind)) {
+  if (["image", "video", "audio", "pdf"].includes(kind)) showNativePreview(entry, kind);
+  else if (SANDBOX_KINDS.has(kind)) {
     previewMessage("正在解密并准备安全预览…", "◇");
     await showSandboxPreview(entry, kind, state.previewRequest);
   } else {
     const legacy = ["doc", "xls", "ppt"].includes(entry.name.split(".").pop().toLowerCase());
-    previewMessage(
-      legacy ? "旧版 Office 格式暂不支持网页解析，可使用下载按钮保存。" : "此格式没有可用的安全网页预览器，可使用下载按钮保存。",
-      "⇩",
-      "",
-      { label: "尝试以文本打开", handler: async () => {
+    previewMessage(legacy ? "旧版 Office 格式暂不支持网页解析，可使用下载按钮保存。" : "此格式没有可用的安全网页预览器，可使用下载按钮保存。", "⇩", "", {
+      label: "尝试以文本打开", handler: async () => {
         clearActivePreview();
         previewMessage("正在解密并尝试以 UTF-8 文本打开…", "◇");
         await showSandboxPreview(entry, "text", state.previewRequest, "无法作为 UTF-8 文本打开");
-      } },
-    );
+      },
+    });
   }
+}
+
+function resetWorkspace() {
+  clearActivePreview();
+  state.selected = null;
+  state.selectedDirectory = "";
+  state.treeNodes.clear();
+  state.operationFinishedAt = null;
+  $("#downloadButton").disabled = true;
+  $("#previewTitle").textContent = "选择文件";
+  previewMessage("从文件树中选择文件进行安全预览", "◇");
+  $("#fileTree").replaceChildren();
+}
+
+function recordActivity() {
+  if (state.status?.unlocked && !state.locking) state.lastActivity = Date.now();
+}
+
+async function autoLockCheck() {
+  if (!state.status?.unlocked || state.locking || state.mediaPlaying) return;
+  const timeout = Number(state.settings.auto_lock_minutes || 3) * 60 * 1000;
+  if (Date.now() - state.lastActivity >= timeout) await lockVault(true);
+}
+
+async function lockVault(automatic = false) {
+  if (state.locking || !state.status?.unlocked) return;
+  state.locking = true;
+  closeDrawer();
+  closeMoreMenu();
+  closeSettings();
+  clearActivePreview();
+  setStatusPill("正在安全锁定");
+  renderOperation(state.status.operation || {});
+  try {
+    await api("/api/lock", { method: "POST" });
+    resetWorkspace();
+    state.status.unlocked = false;
+    if (automatic) state.lockReason = `已因连续 ${state.settings.auto_lock_minutes} 分钟无操作而自动锁定。`;
+  } catch (error) { toast(error.message); }
+  finally { state.locking = false; await refreshStatus(); }
+}
+
+function openDrawer() {
+  if (matchMedia("(max-width: 900px)").matches) {
+    state.drawerOpen = true;
+    $("#sidebar").classList.add("open");
+    $("#drawerScrim").classList.remove("hidden");
+    $("#drawerButton").setAttribute("aria-expanded", "true");
+    document.body.classList.add("drawer-open");
+  }
+}
+
+function closeDrawer() {
+  state.drawerOpen = false;
+  $("#sidebar")?.classList.remove("open");
+  $("#drawerScrim")?.classList.add("hidden");
+  $("#drawerButton")?.setAttribute("aria-expanded", "false");
+  document.body.classList.remove("drawer-open");
+}
+
+function closeDrawerOnMobile() { if (matchMedia("(max-width: 900px)").matches) closeDrawer(); }
+
+function openSettings() {
+  $("#settingsError").classList.add("hidden");
+  $("#settingsRoot").textContent = state.status?.root || state.settings.root || "";
+  $("#autoLockMinutes").value = state.settings.auto_lock_minutes;
+  const radio = document.querySelector(`input[name="theme"][value="${state.settings.theme}"]`);
+  if (radio) radio.checked = true;
+  $("#modalBackdrop").classList.remove("hidden");
+  setTimeout(() => $("#autoLockMinutes").focus(), 0);
+}
+
+function closeSettings() {
+  $("#modalBackdrop").classList.add("hidden");
+  applyTheme(state.settings.theme);
+}
+
+function toggleMoreMenu() {
+  const menu = $("#moreMenu");
+  const open = menu.classList.contains("hidden");
+  menu.classList.toggle("hidden", !open);
+  $("#moreButton").setAttribute("aria-expanded", String(open));
+}
+
+function closeMoreMenu() { $("#moreMenu").classList.add("hidden"); $("#moreButton").setAttribute("aria-expanded", "false"); }
+
+async function switchRoot() {
+  const path = prompt("输入要打开的保险库绝对路径", state.status?.root || "");
+  if (!path || path === state.status?.root) return;
+  clearActivePreview();
+  try {
+    await api("/api/root", { method: "PUT", body: { path } });
+    resetWorkspace();
+    closeSettings();
+    await Promise.all([refreshStatus(), loadSettings()]);
+  } catch (error) { toast(error.message); }
 }
 
 $("#unlockForm").addEventListener("submit", async (event) => {
@@ -386,6 +710,7 @@ $("#unlockForm").addEventListener("submit", async (event) => {
   try {
     await api("/api/unlock", { method: "POST", body: { password: $("#unlockPassword").value } });
     $("#unlockPassword").value = "";
+    state.lastActivity = Date.now();
     await refreshStatus();
   } catch (error) { showError(error.message); }
 });
@@ -394,52 +719,41 @@ $("#initForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   $("#accessError").classList.add("hidden");
   try {
-    await api("/api/init", { method: "POST", body: {
-      password: $("#initPassword").value,
-      password_confirmation: $("#initConfirmation").value
-    }});
+    await api("/api/init", { method: "POST", body: { password: $("#initPassword").value, password_confirmation: $("#initConfirmation").value } });
     $("#initPassword").value = $("#initConfirmation").value = "";
+    state.lastActivity = Date.now();
     await refreshStatus();
   } catch (error) {
-    if (/already initialized/i.test(error.message)) { await refreshStatus(); }
+    if (/already initialized/i.test(error.message)) await refreshStatus();
     else showError(error.message);
   }
 });
 
 $("#applyRoot").addEventListener("click", async () => {
-  try { await api("/api/root", { method: "PUT", body: { path: $("#rootPath").value } }); await refreshStatus(); }
+  try { await api("/api/root", { method: "PUT", body: { path: $("#rootPath").value } }); await Promise.all([refreshStatus(), loadSettings()]); }
   catch (error) { showError(error.message); }
 });
-$("#switchRootButton").addEventListener("click", async () => {
-  const path = prompt("输入要打开的保险库绝对路径", state.status?.root || "");
-  if (!path || path === state.status?.root) return;
-  clearActivePreview();
-  try {
-    await api("/api/root", { method: "PUT", body: { path } });
-    state.selected = null;
-    state.currentPath = "";
-    state.nextOffset = 0;
-    state.history = [{ id: "", name: "根目录" }];
-    state.operationFinishedAt = null;
-    $("#fileList").replaceChildren();
-    $("#downloadButton").disabled = true;
-    $("#previewTitle").textContent = "选择文件";
-    previewMessage("从左侧选择文件进行安全预览", "◇");
-    await refreshStatus();
-  } catch (error) { toast(error.message); }
-});
+$("#switchRootButton").addEventListener("click", switchRoot);
+$("#settingsSwitchRoot").addEventListener("click", switchRoot);
 $("#rescanButton").addEventListener("click", async () => { try { await api("/api/rescan", { method: "POST" }); } catch (error) { toast(error.message); } });
-$("#verifyButton").addEventListener("click", async () => { try { await api("/api/verify", { method: "POST" }); toast("完整校验已开始"); } catch (error) { toast(error.message); } });
-$("#lockButton").addEventListener("click", async () => { try { clearActivePreview(); await api("/api/lock", { method: "POST" }); state.selected = null; $("#fileList").innerHTML = ""; await refreshStatus(); } catch (error) { toast(error.message); } });
-$("#shutdownButton").addEventListener("click", async () => { if (confirm("确定退出 Cryptobox？")) { try { await api("/api/shutdown", { method: "POST" }); document.body.innerHTML = '<div class="access-card"><h1>Cryptobox 已安全退出</h1><p>现在可以关闭此页面。</p></div>'; } catch (error) { toast(error.message); } } });
+$("#verifyButton").addEventListener("click", async () => { closeMoreMenu(); try { await api("/api/verify", { method: "POST" }); toast("完整校验已开始"); } catch (error) { toast(error.message); } });
+$("#lockButton").addEventListener("click", () => { closeMoreMenu(); lockVault(false); });
+$("#shutdownButton").addEventListener("click", async () => {
+  closeMoreMenu();
+  if (confirm("确定退出 Cryptobox？")) {
+    try { await api("/api/shutdown", { method: "POST" }); document.body.innerHTML = '<div class="access-card"><h1>Cryptobox 已安全退出</h1><p>现在可以关闭此页面。</p></div>'; }
+    catch (error) { toast(error.message); }
+  }
+});
 $("#downloadButton").addEventListener("click", () => { if (state.selected) window.location.href = `/api/download/${encodeURIComponent(state.selected.id)}`; });
 $("#exportFolderButton").addEventListener("click", async () => {
   try {
-    const result = await api("/api/export-ticket", { method: "POST", body: { ids: [state.currentPath] } });
+    const result = await api("/api/export-ticket", { method: "POST", body: { ids: [state.selectedDirectory] } });
     window.location.href = result.url;
   } catch (error) { toast(error.message); }
 });
 $("#passwordButton").addEventListener("click", async () => {
+  closeMoreMenu();
   const first = prompt("输入新密码");
   if (!first) return;
   const second = prompt("再次输入新密码");
@@ -448,13 +762,57 @@ $("#passwordButton").addEventListener("click", async () => {
   catch (error) { toast(error.message); }
 });
 
+$("#settingsButton").addEventListener("click", openSettings);
+$("#settingsCloseButton").addEventListener("click", closeSettings);
+$("#settingsCancelButton").addEventListener("click", closeSettings);
+$("#modalBackdrop").addEventListener("click", (event) => { if (event.target === $("#modalBackdrop")) closeSettings(); });
+$("#settingsForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const autoLock = Number($("#autoLockMinutes").value);
+  const theme = document.querySelector('input[name="theme"]:checked')?.value || "system";
+  const errorNode = $("#settingsError");
+  errorNode.classList.add("hidden");
+  try {
+    const settings = await api("/api/settings", { method: "PUT", body: { auto_lock_minutes: autoLock, theme } });
+    state.settings = settings;
+    applyTheme(theme);
+    state.lastActivity = Date.now();
+    closeSettings();
+    toast("设置已保存");
+  } catch (error) { errorNode.textContent = error.message; errorNode.classList.remove("hidden"); }
+});
+document.querySelectorAll('input[name="theme"]').forEach((input) => input.addEventListener("change", () => {
+  document.documentElement.dataset.theme = input.value === "system"
+    ? (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark")
+    : input.value;
+}));
+
+$("#drawerButton").addEventListener("click", openDrawer);
+$("#mobileFilesButton").addEventListener("click", openDrawer);
+$("#drawerCloseButton").addEventListener("click", closeDrawer);
+$("#drawerScrim").addEventListener("click", closeDrawer);
+$("#moreButton").addEventListener("click", toggleMoreMenu);
+document.addEventListener("click", (event) => { if (!event.target.closest(".more-wrap")) closeMoreMenu(); });
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") { closeDrawer(); closeMoreMenu(); closeSettings(); }
+});
+
+const systemTheme = matchMedia("(prefers-color-scheme: light)");
+systemTheme.addEventListener("change", () => { if (state.settings.theme === "system") applyTheme("system"); });
+for (const eventName of ["pointerdown", "pointermove", "keydown", "wheel", "touchstart", "scroll"]) {
+  window.addEventListener(eventName, recordActivity, { passive: true });
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) autoLockCheck(); });
+window.addEventListener("focus", autoLockCheck);
+state.activityTimer = setInterval(autoLockCheck, 5000);
+
 async function loadVersion() {
   try {
     const info = await api("/api/version");
-    const node = $("#appVersion");
-    if (node && info.version) node.textContent = `Cryptobox v${info.version}`;
-  } catch (_) { /* version badge is best-effort */ }
+    if ($("#appVersion") && info.version) $("#appVersion").textContent = `Cryptobox v${info.version}`;
+  } catch (_) {}
 }
 
-refreshStatus();
+applyTheme("system");
+refreshStatus().then(loadSettings);
 loadVersion();

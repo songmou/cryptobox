@@ -1,6 +1,25 @@
 :root { color-scheme: light; font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
 * { box-sizing: border-box; }
 html, body { margin: 0; min-height: 100%; background: #f3f5f4; color: #17201c; }
+:root[data-theme="dark"] { color-scheme: dark; }
+:root[data-theme="dark"] html, :root[data-theme="dark"] body { background: #101514; color: #e8f2ed; }
+:root[data-theme="dark"] .document-text,
+:root[data-theme="dark"] .archive-list,
+:root[data-theme="dark"] .sheet-shell,
+:root[data-theme="dark"] .sheet-table,
+:root[data-theme="dark"] .document-text table { background: #18201e; color: #e8f2ed; }
+:root[data-theme="dark"] .document-text th,
+:root[data-theme="dark"] .document-text td,
+:root[data-theme="dark"] .sheet-table th,
+:root[data-theme="dark"] .sheet-table td,
+:root[data-theme="dark"] .archive-row { border-color: #34423d; }
+:root[data-theme="dark"] .archive-head,
+:root[data-theme="dark"] .sheet-tabs { background: #232e2a; border-color: #34423d; }
+:root[data-theme="dark"] .sheet-tabs button { background: #18201e; color: #e8f2ed; border-color: #42524c; }
+:root[data-theme="dark"] .epub-shell,
+:root[data-theme="dark"] .epub-controls { background: #18201e; color: #e8f2ed; }
+:root[data-theme="dark"] .epub-controls { border-color: #34423d; }
+:root[data-theme="dark"] .epub-controls button { background: #232e2a; color: #e8f2ed; border-color: #42524c; }
 body { overflow: auto; }
 #previewRoot { min-height: 100vh; padding: 22px; }
 .loading, .preview-error { min-height: calc(100vh - 44px); display: grid; place-items: center; color: #607068; text-align: center; }
@@ -33,4 +52,3 @@ body { overflow: auto; }
   .document-text { padding: 20px; }
   .pptx-host, .epub-shell { height: calc(100vh - 20px); }
 }
-

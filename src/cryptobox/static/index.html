@@ -1,8 +1,8 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Cryptobox</title>
     <link rel="stylesheet" href="/static/app.css">
   </head>
@@ -11,14 +11,21 @@
     <div class="ambient ambient-two"></div>
     <main id="shell">
       <header class="topbar">
-        <div class="brand"><span class="brand-mark">C</span><span>Cryptobox</span></div>
-        <div class="status-pill" id="vaultState"><i></i><span>正在连接</span></div>
+        <div class="topbar-left">
+          <button id="drawerButton" class="icon-button mobile-only" type="button" aria-label="打开文件列表" aria-controls="sidebar" aria-expanded="false">☰</button>
+          <div class="brand"><span class="brand-mark">C</span><span>Cryptobox</span></div>
+        </div>
+        <div class="topbar-actions">
+          <div class="status-pill" id="vaultState"><i></i><span>正在连接</span></div>
+          <button id="settingsButton" class="icon-button settings-button" type="button" aria-label="打开设置" title="设置">⚙</button>
+        </div>
       </header>
 
       <section id="accessView" class="access-card hidden">
         <div class="eyebrow">LOCAL ENCRYPTED VAULT</div>
         <h1 id="accessTitle">解锁你的文件</h1>
         <p id="accessDescription">密码只用于本机解锁，不会离开这台设备。</p>
+        <div id="lockNotice" class="notice hidden" role="status"></div>
 
         <form id="unlockForm" class="stack hidden">
           <label>保险库密码<input id="unlockPassword" type="password" autocomplete="current-password" required></label>
@@ -39,28 +46,39 @@
       </section>
 
       <section id="workspace" class="workspace hidden">
-        <aside class="sidebar">
+        <div id="drawerScrim" class="drawer-scrim hidden"></div>
+        <aside class="sidebar" id="sidebar" aria-label="文件浏览器">
           <div class="sidebar-head">
-            <span class="eyebrow">VAULT</span>
+            <div><span class="eyebrow">VAULT</span><h3>文件</h3></div>
             <div class="sidebar-actions">
-              <button id="switchRootButton" class="icon-button" title="切换文件夹" aria-label="切换文件夹">⇄</button>
-              <button id="rescanButton" class="icon-button" title="重新扫描" aria-label="重新扫描">↻</button>
+              <button id="switchRootButton" class="icon-button" type="button" title="切换文件夹" aria-label="切换文件夹">⇄</button>
+              <button id="rescanButton" class="icon-button" type="button" title="重新扫描" aria-label="重新扫描">↻</button>
+              <button id="drawerCloseButton" class="icon-button mobile-only" type="button" aria-label="关闭文件列表">×</button>
             </div>
           </div>
           <div class="root-label" id="rootLabel"></div>
-          <nav class="breadcrumbs" id="breadcrumbs"></nav>
-          <div class="file-list" id="fileList"></div>
+          <div class="tree-help">点击箭头展开 · 点击名称选中目录</div>
+          <div class="file-tree" id="fileTree" role="tree" aria-label="保险库目录"></div>
         </aside>
+
         <section class="content">
           <div class="content-head">
-            <div><span class="eyebrow">PREVIEW</span><h2 id="previewTitle">选择文件</h2></div>
+            <div class="preview-heading">
+              <button id="mobileFilesButton" class="secondary mobile-only" type="button">文件</button>
+              <div><span class="eyebrow">PREVIEW</span><h2 id="previewTitle">选择文件</h2></div>
+            </div>
             <div class="actions">
               <button id="downloadButton" class="secondary" disabled>下载</button>
-              <button id="exportFolderButton" class="secondary">导出当前目录</button>
-              <button id="verifyButton" class="secondary">完整校验</button>
-              <button id="passwordButton" class="secondary">修改密码</button>
-              <button id="lockButton" class="secondary">锁定</button>
-              <button id="shutdownButton" class="danger-button">退出</button>
+              <button id="exportFolderButton" class="secondary">导出目录</button>
+              <div class="more-wrap">
+                <button id="moreButton" class="secondary" type="button" aria-expanded="false" aria-controls="moreMenu">更多</button>
+                <div id="moreMenu" class="more-menu hidden">
+                  <button id="verifyButton" type="button">完整校验</button>
+                  <button id="passwordButton" type="button">修改密码</button>
+                  <button id="lockButton" type="button">锁定</button>
+                  <button id="shutdownButton" class="danger-text" type="button">退出 Cryptobox</button>
+                </div>
+              </div>
             </div>
           </div>
           <div class="operation hidden" id="operationPanel">
@@ -68,10 +86,36 @@
             <div class="progress"><i id="progressBar"></i></div>
             <div id="operationErrors" class="operation-errors"></div>
           </div>
-          <div class="preview empty" id="preview"><div class="empty-state"><span>◇</span><p>从左侧选择文件进行安全预览</p></div></div>
+          <div class="preview empty" id="preview"><div class="empty-state"><span>◇</span><p>从文件树中选择文件进行安全预览</p></div></div>
         </section>
       </section>
-      <div id="toast" class="toast hidden"></div>
+
+      <div id="modalBackdrop" class="modal-backdrop hidden">
+        <section id="settingsDialog" class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+          <div class="dialog-head"><div><span class="eyebrow">PREFERENCES</span><h2 id="settingsTitle">设置</h2></div><button id="settingsCloseButton" class="icon-button" type="button" aria-label="关闭设置">×</button></div>
+          <form id="settingsForm" class="settings-form">
+            <label>当前保险库文件夹
+              <div class="setting-path"><span id="settingsRoot"></span><button id="settingsSwitchRoot" type="button" class="secondary">切换</button></div>
+            </label>
+            <label>无操作自动锁定
+              <div class="number-field"><input id="autoLockMinutes" type="number" min="1" max="120" step="1" required><span>分钟</span></div>
+              <small>允许 1–120 分钟。音视频播放期间不会自动锁定。</small>
+            </label>
+            <fieldset>
+              <legend>主题</legend>
+              <div class="theme-options">
+                <label><input type="radio" name="theme" value="system"><span>跟随系统</span></label>
+                <label><input type="radio" name="theme" value="light"><span>浅色</span></label>
+                <label><input type="radio" name="theme" value="dark"><span>深色</span></label>
+              </div>
+            </fieldset>
+            <div id="settingsError" class="error hidden"></div>
+            <div class="dialog-actions"><button id="settingsCancelButton" type="button" class="secondary">取消</button><button type="submit" class="primary">保存设置</button></div>
+          </form>
+        </section>
+      </div>
+
+      <div id="toast" class="toast hidden" role="status"></div>
       <footer class="app-footer"><span id="appVersion">Cryptobox</span><span>·</span><a href="/static/THIRD_PARTY_NOTICES.txt" target="_blank" rel="noopener">第三方许可</a></footer>
     </main>
     <script src="/static/app.js" defer></script>
