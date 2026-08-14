@@ -168,18 +168,23 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
 
     @app.get("/api/status", dependencies=[Depends(require_session)])
     async def status() -> dict[str, object]:
+        remaining = runtime.ensure_auto_lock(auto_lock_timeout_seconds())
         return {
             "initialized": runtime.manager.initialized,
             "unlocked": runtime.unlocked,
             "root": str(runtime.root),
             "operation": runtime.tracker.snapshot(),
             "csrf": csrf_token,
+            "auto_lock_remaining_seconds": remaining,
         }
 
     def current_settings() -> AppSettings:
         if runtime.settings_path is None:
             return AppSettings(last_root=runtime.root)
         return load_settings(runtime.settings_path)
+
+    def auto_lock_timeout_seconds() -> int:
+        return current_settings().auto_lock_minutes * 60
 
     @app.get("/api/settings", dependencies=[Depends(require_session)])
     async def get_settings() -> dict[str, object]:
@@ -192,6 +197,7 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
 
     @app.put("/api/settings", dependencies=[Depends(require_csrf)])
     async def update_settings(payload: SettingsRequest) -> dict[str, object]:
+        unlocked()
         if payload.theme not in {"system", "light", "dark"}:
             raise HTTPException(status_code=422, detail="Theme must be system, light, or dark")
         if runtime.settings_path is None:
@@ -205,6 +211,7 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
             )
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        runtime.reset_auto_lock(settings.auto_lock_minutes * 60)
         return {
             "root": str(runtime.root),
             "auto_lock_minutes": settings.auto_lock_minutes,
@@ -243,6 +250,7 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
             reject_source_tree(runtime.root)
             session = await asyncio.to_thread(runtime.manager.create, payload.password)
             runtime.attach_session(session)
+            runtime.reset_auto_lock(auto_lock_timeout_seconds())
             runtime.start_scan()
         except CryptoboxError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -255,6 +263,7 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
         try:
             session = await asyncio.to_thread(runtime.manager.unlock, payload.password)
             runtime.attach_session(session)
+            runtime.reset_auto_lock(auto_lock_timeout_seconds())
             runtime.start_scan()
         except InvalidPassword as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
@@ -266,6 +275,16 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
     async def lock() -> dict[str, bool]:
         await runtime.lock()
         return {"locked": True}
+
+    @app.post("/api/activity", dependencies=[Depends(require_csrf)])
+    async def activity() -> dict[str, int]:
+        unlocked()
+        if runtime.auto_lock_remaining_seconds() == 0:
+            await runtime.lock()
+            raise HTTPException(status_code=423, detail="Vault is locked")
+        remaining = runtime.reset_auto_lock(auto_lock_timeout_seconds())
+        assert remaining is not None
+        return {"auto_lock_remaining_seconds": remaining}
 
     @app.post("/api/rescan", dependencies=[Depends(require_csrf)])
     async def rescan() -> dict[str, bool]:

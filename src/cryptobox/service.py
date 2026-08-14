@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from pathlib import Path
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -47,6 +48,8 @@ class RuntimeState:
         self.observer: Observer | None = None
         self.watch_task: asyncio.Task[None] | None = None
         self.active_task: asyncio.Task[dict[str, object]] | None = None
+        self.auto_lock_task: asyncio.Task[None] | None = None
+        self.auto_lock_deadline: float | None = None
         self.shutdown_event = asyncio.Event()
 
     @property
@@ -64,8 +67,49 @@ class RuntimeState:
                 LOGGER.warning("Unable to remember vault directory", exc_info=True)
 
     def attach_session(self, session: VaultSession) -> None:
+        self.cancel_auto_lock()
         self.session = session
         self.index = VaultIndex(session.index_path, session.derive_key(b"index"))
+
+    def cancel_auto_lock(self) -> None:
+        task = self.auto_lock_task
+        self.auto_lock_task = None
+        self.auto_lock_deadline = None
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+
+    def reset_auto_lock(self, timeout_seconds: float) -> int | None:
+        """Start or extend the authoritative inactivity deadline."""
+        if not self.unlocked:
+            self.cancel_auto_lock()
+            return None
+        loop = asyncio.get_running_loop()
+        self.cancel_auto_lock()
+        deadline = loop.time() + timeout_seconds
+        self.auto_lock_deadline = deadline
+        self.auto_lock_task = asyncio.create_task(self._auto_lock_after(deadline))
+        return self.auto_lock_remaining_seconds()
+
+    def ensure_auto_lock(self, timeout_seconds: float) -> int | None:
+        if self.unlocked and self.auto_lock_deadline is None:
+            return self.reset_auto_lock(timeout_seconds)
+        return self.auto_lock_remaining_seconds()
+
+    def auto_lock_remaining_seconds(self) -> int | None:
+        if not self.unlocked or self.auto_lock_deadline is None:
+            return None
+        remaining = self.auto_lock_deadline - asyncio.get_running_loop().time()
+        return max(0, math.ceil(remaining))
+
+    async def _auto_lock_after(self, deadline: float) -> None:
+        try:
+            await asyncio.sleep(max(0, deadline - asyncio.get_running_loop().time()))
+        except asyncio.CancelledError:
+            return
+        if self.auto_lock_deadline != deadline or not self.unlocked:
+            return
+        self.auto_lock_task = None
+        await self.lock()
 
     def _rebuild_index(self) -> None:
         assert self.session is not None
@@ -90,6 +134,7 @@ class RuntimeState:
         self.start_scan()
 
     async def lock(self) -> None:
+        self.cancel_auto_lock()
         await self.stop_watcher()
         if self.active_task and not self.active_task.done():
             try:

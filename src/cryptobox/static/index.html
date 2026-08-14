@@ -11,13 +11,18 @@
     <div class="ambient ambient-two"></div>
     <main id="shell">
       <header class="topbar">
-        <div class="topbar-left">
-          <button id="drawerButton" class="icon-button mobile-only" type="button" aria-label="打开文件列表" aria-controls="sidebar" aria-expanded="false">☰</button>
-          <div class="brand"><span class="brand-mark">C</span><span>Cryptobox</span></div>
+        <div class="brand"><span class="brand-mark">C</span><span>Cryptobox</span></div>
+        <div class="preview-heading header-preview workspace-header-control hidden">
+          <button id="drawerButton" class="secondary mobile-only" type="button" aria-label="打开文件列表" aria-controls="sidebar" aria-expanded="false">文件</button>
+          <div><span class="eyebrow">PREVIEW</span><h2 id="previewTitle">选择文件</h2></div>
         </div>
-        <div class="topbar-actions">
+        <div class="header-file-actions workspace-header-control hidden">
+          <button id="downloadButton" class="secondary" disabled>下载</button>
+          <button id="exportFolderButton" class="secondary">导出目录</button>
+        </div>
+        <div class="header-status-actions">
           <div class="status-pill" id="vaultState"><i></i><span>正在连接</span></div>
-          <button id="settingsButton" class="icon-button settings-button" type="button" aria-label="打开设置" title="设置">⚙</button>
+          <button id="settingsButton" class="icon-button settings-button hidden" type="button" aria-label="打开设置" title="设置">⚙</button>
         </div>
       </header>
 
@@ -62,25 +67,6 @@
         </aside>
 
         <section class="content">
-          <div class="content-head">
-            <div class="preview-heading">
-              <button id="mobileFilesButton" class="secondary mobile-only" type="button">文件</button>
-              <div><span class="eyebrow">PREVIEW</span><h2 id="previewTitle">选择文件</h2></div>
-            </div>
-            <div class="actions">
-              <button id="downloadButton" class="secondary" disabled>下载</button>
-              <button id="exportFolderButton" class="secondary">导出目录</button>
-              <div class="more-wrap">
-                <button id="moreButton" class="secondary" type="button" aria-expanded="false" aria-controls="moreMenu">更多</button>
-                <div id="moreMenu" class="more-menu hidden">
-                  <button id="verifyButton" type="button">完整校验</button>
-                  <button id="passwordButton" type="button">修改密码</button>
-                  <button id="lockButton" type="button">锁定</button>
-                  <button id="shutdownButton" class="danger-text" type="button">退出 Cryptobox</button>
-                </div>
-              </div>
-            </div>
-          </div>
           <div class="operation hidden" id="operationPanel">
             <div class="operation-row"><span id="operationText">正在扫描</span><span id="operationCount"></span></div>
             <div class="progress"><i id="progressBar"></i></div>
@@ -109,6 +95,15 @@
                 <label><input type="radio" name="theme" value="dark"><span>深色</span></label>
               </div>
             </fieldset>
+            <fieldset class="vault-settings-actions">
+              <legend>保险库操作</legend>
+              <div class="vault-action-grid">
+                <button id="verifyButton" class="secondary" type="button">完整校验</button>
+                <button id="passwordButton" class="secondary" type="button">修改密码</button>
+                <button id="lockButton" class="secondary" type="button">锁定</button>
+                <button id="shutdownButton" class="secondary danger-text" type="button">退出 Cryptobox</button>
+              </div>
+            </fieldset>
             <div id="settingsError" class="error hidden"></div>
             <div class="dialog-actions"><button id="settingsCancelButton" type="button" class="secondary">取消</button><button type="submit" class="primary">保存设置</button></div>
           </form>
@@ -116,7 +111,7 @@
       </div>
 
       <div id="toast" class="toast hidden" role="status"></div>
-      <footer class="app-footer"><span id="appVersion">Cryptobox</span><span>·</span><a href="/static/THIRD_PARTY_NOTICES.txt" target="_blank" rel="noopener">第三方许可</a></footer>
+      <footer class="app-footer"><span id="autoLockCountdown" class="footer-countdown hidden" role="status"></span><span id="footerDivider" class="hidden">·</span><span id="appVersion">Cryptobox</span><span>·</span><a href="/static/THIRD_PARTY_NOTICES.txt" target="_blank" rel="noopener">第三方许可</a></footer>
     </main>
     <script src="/static/app.js" defer></script>
   </body>

@@ -12,8 +12,12 @@ const state = {
   previewRequest: 0,
   operationFinishedAt: null,
   drawerOpen: false,
-  lastActivity: Date.now(),
+  autoLockDeadlineMs: null,
+  lastActivityReportAt: 0,
+  activityRequest: null,
+  checkingAutoLock: false,
   activityTimer: null,
+  mediaHeartbeat: null,
   mediaPlaying: false,
   locking: false,
   lockReason: "",
@@ -24,6 +28,9 @@ const DOCUMENT_PREVIEW_LIMIT = 50 * 1024 * 1024;
 const SANDBOX_KINDS = new Set(["text", "unknown", "markdown", "table", "html", "svg", "word", "spreadsheet", "presentation", "ebook", "archive"]);
 const ZOOM_MIN = 0.1;
 const ZOOM_MAX = 8;
+const ACTIVITY_REPORT_INTERVAL = 5000;
+const MEDIA_HEARTBEAT_INTERVAL = 30000;
+const TREE_CHEVRON = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 4 6 6-6 6"/></svg>';
 
 function formatBytes(value = 0) {
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -42,7 +49,18 @@ function clearActivePreview() {
   if (state.previewCleanup) state.previewCleanup();
   state.previewController = null;
   state.previewCleanup = null;
-  state.mediaPlaying = false;
+  setMediaPlaying(false);
+}
+
+function setMediaPlaying(playing) {
+  state.mediaPlaying = playing;
+  clearInterval(state.mediaHeartbeat);
+  state.mediaHeartbeat = null;
+  if (playing) {
+    reportActivity(true);
+    state.mediaHeartbeat = setInterval(() => reportActivity(true), MEDIA_HEARTBEAT_INTERVAL);
+  } else if (state.status?.unlocked && !state.locking) reportActivity(true);
+  updateAutoLockCountdown();
 }
 
 function previewMessage(message, symbol = "⇩", kind = "", action = null) {
@@ -165,8 +183,9 @@ function showMediaPreview(entry, kind) {
   media.addEventListener(kind === "image" ? "load" : "loadedmetadata", ready, { once: true });
   media.addEventListener("error", () => previewMessage("浏览器无法解码此文件或媒体编码，可使用下载按钮保存后查看。", "!", "preview-warning"), { once: true });
   if (kind === "video") {
-    media.addEventListener("play", () => { state.mediaPlaying = true; recordActivity(); });
-    for (const event of ["pause", "ended", "error", "emptied"]) media.addEventListener(event, () => { state.mediaPlaying = false; recordActivity(); });
+    media.addEventListener("play", () => setMediaPlaying(true));
+    media.addEventListener("timeupdate", recordActivity);
+    for (const event of ["pause", "ended", "error", "emptied"]) media.addEventListener(event, () => setMediaPlaying(false));
   }
 
   toolbar.addEventListener("click", async (event) => {
@@ -226,7 +245,7 @@ function showMediaPreview(entry, kind) {
   resizeObserver.observe(stage);
   media.src = contentUrl(entry);
   state.previewCleanup = () => {
-    state.mediaPlaying = false;
+    setMediaPlaying(false);
     resizeObserver?.disconnect();
     document.removeEventListener("fullscreenchange", fullscreenChange);
     media.pause?.();
@@ -242,14 +261,15 @@ function showNativePreview(entry, kind) {
   if (kind === "audio") {
     node.controls = true;
     node.preload = "metadata";
-    node.addEventListener("play", () => { state.mediaPlaying = true; recordActivity(); });
-    for (const event of ["pause", "ended", "error", "emptied"]) node.addEventListener(event, () => { state.mediaPlaying = false; recordActivity(); });
+    node.addEventListener("play", () => setMediaPlaying(true));
+    node.addEventListener("timeupdate", recordActivity);
+    for (const event of ["pause", "ended", "error", "emptied"]) node.addEventListener(event, () => setMediaPlaying(false));
   } else node.title = entry.name;
   node.addEventListener("error", () => previewMessage("浏览器无法解码此文件或媒体编码，可使用下载按钮保存后查看。", "!", "preview-warning"), { once: true });
   node.src = contentUrl(entry);
   target.replaceChildren(node);
   state.previewCleanup = () => {
-    state.mediaPlaying = false;
+    setMediaPlaying(false);
     if (kind === "audio") { node.pause(); node.removeAttribute("src"); node.load(); }
     else node.src = "about:blank";
   };
@@ -367,13 +387,16 @@ async function loadSettings() {
 
 async function refreshStatus() {
   try {
+    const wasUnlocked = Boolean(state.status?.unlocked);
     const info = await api("/api/status");
     state.status = info;
     state.csrf = info.csrf;
+    syncAutoLockDeadline(info.auto_lock_remaining_seconds);
     $("#rootPath").value = info.root;
     $("#rootLabel").textContent = info.root;
     $("#settingsRoot").textContent = info.root;
     if (state.locking) return info;
+    if (wasUnlocked && !info.unlocked) state.lockReason = `已因连续 ${state.settings.auto_lock_minutes} 分钟无操作而自动锁定。`;
     if (!info.initialized) showInit();
     else if (!info.unlocked) showUnlock();
     else showWorkspace(info);
@@ -386,7 +409,12 @@ async function refreshStatus() {
 }
 
 function showInit() {
+  hideAutoLockCountdown();
   closeDrawer();
+  closeSettings();
+  $(".topbar").classList.remove("workspace-visible");
+  document.querySelectorAll(".workspace-header-control").forEach((node) => node.classList.add("hidden"));
+  $("#settingsButton").classList.add("hidden");
   $("#workspace").classList.add("hidden");
   $("#accessView").classList.remove("hidden");
   $("#unlockForm").classList.add("hidden");
@@ -399,7 +427,12 @@ function showInit() {
 }
 
 function showUnlock() {
+  hideAutoLockCountdown();
   closeDrawer();
+  closeSettings();
+  $(".topbar").classList.remove("workspace-visible");
+  document.querySelectorAll(".workspace-header-control").forEach((node) => node.classList.add("hidden"));
+  $("#settingsButton").classList.add("hidden");
   $("#workspace").classList.add("hidden");
   $("#accessView").classList.remove("hidden");
   $("#initForm").classList.add("hidden");
@@ -415,6 +448,9 @@ function showUnlock() {
 function showWorkspace(info) {
   $("#accessView").classList.add("hidden");
   $("#workspace").classList.remove("hidden");
+  $(".topbar").classList.add("workspace-visible");
+  document.querySelectorAll(".workspace-header-control").forEach((node) => node.classList.remove("hidden"));
+  $("#settingsButton").classList.toggle("hidden", !info.unlocked);
   const phase = info.operation.phase;
   setStatusPill(phase === "ready" ? "已保护" : phase === "error" ? "需要处理" : "正在处理", phase === "ready" ? "ready" : phase === "error" ? "error" : "");
   const finishedAt = info.operation.finished_at || null;
@@ -423,6 +459,7 @@ function showWorkspace(info) {
     refreshTreePreservingExpansion();
   }
   if (!state.poll) state.poll = setInterval(refreshStatus, 1000);
+  updateAutoLockCountdown();
 }
 
 async function loadPreview() {
@@ -489,11 +526,11 @@ function renderTreeEntries(node, container) {
     if (entry.kind === "directory") {
       const child = state.treeNodes.get(entry.id);
       row.setAttribute("aria-expanded", String(Boolean(child?.expanded)));
-      row.innerHTML = `<button class="tree-toggle" type="button" aria-label="${child?.expanded ? "收起" : "展开"} ${escapeHtml(entry.name)}">${child?.expanded ? "⌄" : "›"}</button><span class="file-icon" aria-hidden="true">${fileIcon(entry)}</span><button class="tree-name" type="button">${escapeHtml(entry.name)}</button><span></span>`;
+      row.innerHTML = `<button class="tree-toggle" type="button" aria-expanded="${Boolean(child?.expanded)}" aria-label="${child?.expanded ? "收起" : "展开"} ${escapeHtml(entry.name)}">${TREE_CHEVRON}</button><span class="file-icon" aria-hidden="true">${fileIcon(entry)}</span><button class="tree-name" type="button">${escapeHtml(entry.name)}</button><span></span>`;
       row.querySelector(".tree-toggle").addEventListener("click", () => toggleDirectory(entry.id));
       row.querySelector(".tree-name").addEventListener("click", () => selectDirectory(entry.id));
     } else {
-      const status = encrypted ? "" : '<span class="file-status plain">未加密</span>';
+      const status = encrypted ? '<span class="file-status">已加密</span>' : '<span class="file-status plain">未加密</span>';
       row.innerHTML = `<span class="tree-spacer"></span><span class="file-icon" aria-hidden="true">${fileIcon(entry)}</span><button class="tree-name" type="button">${escapeHtml(entry.name)}</button><span class="file-meta">${status}<span class="file-size">${formatBytes(entry.size)}</span></span>`;
       row.querySelector(".tree-name").addEventListener("click", () => { previewFile(entry); closeDrawerOnMobile(); });
     }
@@ -537,7 +574,7 @@ function renderTree() {
   rootRow.setAttribute("role", "treeitem");
   rootRow.setAttribute("aria-expanded", "true");
   rootRow.tabIndex = 0;
-  rootRow.innerHTML = `<span class="tree-toggle fixed">⌄</span><span class="file-icon">${FILE_ICONS.directory}</span><button class="tree-name" type="button">根目录</button><span></span>`;
+  rootRow.innerHTML = `<span class="tree-toggle fixed" aria-hidden="true">${TREE_CHEVRON}</span><span class="file-icon">${FILE_ICONS.directory}</span><button class="tree-name" type="button">根目录</button><span></span>`;
   rootRow.querySelector(".tree-name").addEventListener("click", () => selectDirectory(""));
   tree.appendChild(rootRow);
   if (root.loading) appendTreeMessage(tree, 1, "正在加载…");
@@ -620,21 +657,76 @@ function resetWorkspace() {
   $("#fileTree").replaceChildren();
 }
 
+function syncAutoLockDeadline(remainingSeconds) {
+  state.autoLockDeadlineMs = Number.isFinite(remainingSeconds) ? Date.now() + Number(remainingSeconds) * 1000 : null;
+}
+
+function hideAutoLockCountdown() {
+  state.autoLockDeadlineMs = null;
+  $("#autoLockCountdown").classList.add("hidden");
+  $("#footerDivider").classList.add("hidden");
+}
+
+function updateAutoLockCountdown() {
+  const node = $("#autoLockCountdown");
+  if (!state.status?.unlocked && !state.locking) { hideAutoLockCountdown(); return; }
+  node.className = "footer-countdown";
+  node.classList.remove("hidden");
+  $("#footerDivider").classList.remove("hidden");
+  if (state.locking) {
+    node.textContent = "正在锁定…";
+    node.classList.add("locking");
+    return;
+  }
+  if (state.mediaPlaying) {
+    node.textContent = "播放中 · 自动锁定已暂停";
+    node.classList.add("paused");
+    return;
+  }
+  const remaining = Math.max(0, Math.ceil(((state.autoLockDeadlineMs || Date.now()) - Date.now()) / 1000));
+  const minutes = Math.floor(remaining / 60);
+  const seconds = remaining % 60;
+  node.textContent = `自动锁定 ${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+async function reportActivity(force = false) {
+  if (!state.status?.unlocked || state.locking || state.checkingAutoLock) return;
+  const now = Date.now();
+  if (!force && (state.activityRequest || now - state.lastActivityReportAt < ACTIVITY_REPORT_INTERVAL)) return;
+  state.lastActivityReportAt = now;
+  const request = api("/api/activity", { method: "POST" });
+  state.activityRequest = request;
+  try {
+    const result = await request;
+    syncAutoLockDeadline(result.auto_lock_remaining_seconds);
+    updateAutoLockCountdown();
+  } catch (_) {
+    await refreshStatus();
+  } finally {
+    if (state.activityRequest === request) state.activityRequest = null;
+  }
+}
+
 function recordActivity() {
-  if (state.status?.unlocked && !state.locking) state.lastActivity = Date.now();
+  reportActivity(false);
 }
 
 async function autoLockCheck() {
-  if (!state.status?.unlocked || state.locking || state.mediaPlaying) return;
-  const timeout = Number(state.settings.auto_lock_minutes || 3) * 60 * 1000;
-  if (Date.now() - state.lastActivity >= timeout) await lockVault(true);
+  updateAutoLockCountdown();
+  if (!state.status?.unlocked || state.locking || state.mediaPlaying || state.autoLockDeadlineMs === null) return;
+  if (Date.now() >= state.autoLockDeadlineMs) {
+    state.checkingAutoLock = true;
+    try { await refreshStatus(); }
+    finally { state.checkingAutoLock = false; }
+  }
 }
 
 async function lockVault(automatic = false) {
   if (state.locking || !state.status?.unlocked) return;
   state.locking = true;
+  $("#settingsButton").classList.add("hidden");
+  updateAutoLockCountdown();
   closeDrawer();
-  closeMoreMenu();
   closeSettings();
   clearActivePreview();
   setStatusPill("正在安全锁定");
@@ -669,6 +761,7 @@ function closeDrawer() {
 function closeDrawerOnMobile() { if (matchMedia("(max-width: 900px)").matches) closeDrawer(); }
 
 function openSettings() {
+  if (!state.status?.unlocked || state.locking) return;
   $("#settingsError").classList.add("hidden");
   $("#settingsRoot").textContent = state.status?.root || state.settings.root || "";
   $("#autoLockMinutes").value = state.settings.auto_lock_minutes;
@@ -682,15 +775,6 @@ function closeSettings() {
   $("#modalBackdrop").classList.add("hidden");
   applyTheme(state.settings.theme);
 }
-
-function toggleMoreMenu() {
-  const menu = $("#moreMenu");
-  const open = menu.classList.contains("hidden");
-  menu.classList.toggle("hidden", !open);
-  $("#moreButton").setAttribute("aria-expanded", String(open));
-}
-
-function closeMoreMenu() { $("#moreMenu").classList.add("hidden"); $("#moreButton").setAttribute("aria-expanded", "false"); }
 
 async function switchRoot() {
   const path = prompt("输入要打开的保险库绝对路径", state.status?.root || "");
@@ -710,7 +794,6 @@ $("#unlockForm").addEventListener("submit", async (event) => {
   try {
     await api("/api/unlock", { method: "POST", body: { password: $("#unlockPassword").value } });
     $("#unlockPassword").value = "";
-    state.lastActivity = Date.now();
     await refreshStatus();
   } catch (error) { showError(error.message); }
 });
@@ -721,7 +804,6 @@ $("#initForm").addEventListener("submit", async (event) => {
   try {
     await api("/api/init", { method: "POST", body: { password: $("#initPassword").value, password_confirmation: $("#initConfirmation").value } });
     $("#initPassword").value = $("#initConfirmation").value = "";
-    state.lastActivity = Date.now();
     await refreshStatus();
   } catch (error) {
     if (/already initialized/i.test(error.message)) await refreshStatus();
@@ -736,10 +818,10 @@ $("#applyRoot").addEventListener("click", async () => {
 $("#switchRootButton").addEventListener("click", switchRoot);
 $("#settingsSwitchRoot").addEventListener("click", switchRoot);
 $("#rescanButton").addEventListener("click", async () => { try { await api("/api/rescan", { method: "POST" }); } catch (error) { toast(error.message); } });
-$("#verifyButton").addEventListener("click", async () => { closeMoreMenu(); try { await api("/api/verify", { method: "POST" }); toast("完整校验已开始"); } catch (error) { toast(error.message); } });
-$("#lockButton").addEventListener("click", () => { closeMoreMenu(); lockVault(false); });
+$("#verifyButton").addEventListener("click", async () => { closeSettings(); try { await api("/api/verify", { method: "POST" }); toast("完整校验已开始"); } catch (error) { toast(error.message); } });
+$("#lockButton").addEventListener("click", () => lockVault(false));
 $("#shutdownButton").addEventListener("click", async () => {
-  closeMoreMenu();
+  closeSettings();
   if (confirm("确定退出 Cryptobox？")) {
     try { await api("/api/shutdown", { method: "POST" }); document.body.innerHTML = '<div class="access-card"><h1>Cryptobox 已安全退出</h1><p>现在可以关闭此页面。</p></div>'; }
     catch (error) { toast(error.message); }
@@ -753,7 +835,7 @@ $("#exportFolderButton").addEventListener("click", async () => {
   } catch (error) { toast(error.message); }
 });
 $("#passwordButton").addEventListener("click", async () => {
-  closeMoreMenu();
+  closeSettings();
   const first = prompt("输入新密码");
   if (!first) return;
   const second = prompt("再次输入新密码");
@@ -776,7 +858,8 @@ $("#settingsForm").addEventListener("submit", async (event) => {
     const settings = await api("/api/settings", { method: "PUT", body: { auto_lock_minutes: autoLock, theme } });
     state.settings = settings;
     applyTheme(theme);
-    state.lastActivity = Date.now();
+    syncAutoLockDeadline(autoLock * 60);
+    updateAutoLockCountdown();
     closeSettings();
     toast("设置已保存");
   } catch (error) { errorNode.textContent = error.message; errorNode.classList.remove("hidden"); }
@@ -788,13 +871,10 @@ document.querySelectorAll('input[name="theme"]').forEach((input) => input.addEve
 }));
 
 $("#drawerButton").addEventListener("click", openDrawer);
-$("#mobileFilesButton").addEventListener("click", openDrawer);
 $("#drawerCloseButton").addEventListener("click", closeDrawer);
 $("#drawerScrim").addEventListener("click", closeDrawer);
-$("#moreButton").addEventListener("click", toggleMoreMenu);
-document.addEventListener("click", (event) => { if (!event.target.closest(".more-wrap")) closeMoreMenu(); });
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") { closeDrawer(); closeMoreMenu(); closeSettings(); }
+  if (event.key === "Escape") { closeDrawer(); closeSettings(); }
 });
 
 const systemTheme = matchMedia("(prefers-color-scheme: light)");
@@ -803,8 +883,8 @@ for (const eventName of ["pointerdown", "pointermove", "keydown", "wheel", "touc
   window.addEventListener(eventName, recordActivity, { passive: true });
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden) autoLockCheck(); });
-window.addEventListener("focus", autoLockCheck);
-state.activityTimer = setInterval(autoLockCheck, 5000);
+window.addEventListener("focus", autoLockCheck, true);
+state.activityTimer = setInterval(autoLockCheck, 1000);
 
 async function loadVersion() {
   try {

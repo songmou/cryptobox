@@ -52,6 +52,28 @@ def test_web_version_matches_project_version(tmp_path: Path) -> None:
         assert client.get("/api/version").json() == {"version": project_version}
 
 
+def test_static_ui_integrates_workspace_actions_into_header_and_settings(tmp_path: Path) -> None:
+    runtime = RuntimeState(tmp_path)
+    app = create_app(runtime, "static-ui-token")
+
+    with TestClient(app) as client:
+        client.get("/?token=static-ui-token")
+        html = client.get("/").text
+        script = client.get("/static/app.js").text
+
+    header = html[html.index('<header class="topbar">'):html.index("</header>")]
+    assert all(item in header for item in ("previewTitle", "drawerButton", "downloadButton", "exportFolderButton"))
+    assert 'id="settingsButton" class="icon-button settings-button hidden"' in header
+    settings_start = html.index('<section id="settingsDialog"')
+    settings_dialog = html[settings_start:html.index("</form>", settings_start)]
+    assert all(item in settings_dialog for item in ("verifyButton", "passwordButton", "lockButton", "shutdownButton"))
+    assert "content-head" not in html
+    assert "moreButton" not in html
+    assert "moreMenu" not in html
+    assert 'if (!state.status?.unlocked || state.locking) return;' in script
+    assert '$("#settingsButton").classList.add("hidden")' in script
+
+
 def test_bootstrap_is_one_time_and_range_is_exact(tmp_path: Path) -> None:
     runtime, payload = prepared_runtime(tmp_path)
     app = create_app(runtime, "one-time-token")
@@ -334,6 +356,7 @@ def test_settings_api_validates_and_preserves_preferences_across_root_change(tmp
     settings_path = tmp_path / "settings.json"
     save_last_root(settings_path, old_root)
     runtime = RuntimeState(old_root, settings_path=settings_path)
+    runtime.attach_session(VaultManager(old_root).create("settings password"))
     app = create_app(runtime, "settings-token")
 
     with TestClient(app) as client:
@@ -374,6 +397,61 @@ def test_settings_api_validates_and_preserves_preferences_across_root_change(tmp
     assert stored.last_root == new_root.resolve()
     assert stored.auto_lock_minutes == 20
     assert stored.theme == "dark"
+
+
+def test_locked_vault_cannot_save_settings(tmp_path: Path) -> None:
+    root = tmp_path / "locked-settings-root"
+    root.mkdir()
+    settings_path = tmp_path / "locked-settings.json"
+    save_last_root(settings_path, root)
+    runtime = RuntimeState(root, settings_path=settings_path)
+    app = create_app(runtime, "locked-settings-token")
+
+    with TestClient(app) as client:
+        client.get("/?token=locked-settings-token")
+        status = client.get("/api/status").json()
+        assert status["unlocked"] is False
+        assert client.get("/api/settings").status_code == 200
+        response = client.put(
+            "/api/settings",
+            headers={"X-Cryptobox-CSRF": status["csrf"]},
+            json={"auto_lock_minutes": 20, "theme": "dark"},
+        )
+        assert response.status_code == 423
+
+    stored = load_settings(settings_path)
+    assert stored.auto_lock_minutes == 3
+    assert stored.theme == "system"
+
+
+def test_activity_api_resets_authoritative_auto_lock_deadline(tmp_path: Path) -> None:
+    runtime = prepared_file_runtime(tmp_path, "protected.txt", b"protected")
+    app = create_app(runtime, "activity-token")
+
+    with TestClient(app) as client:
+        client.get("/?token=activity-token")
+        status = client.get("/api/status").json()
+        assert 1 <= status["auto_lock_remaining_seconds"] <= 180
+        csrf = status["csrf"]
+
+        assert client.post("/api/activity").status_code == 403
+        runtime.auto_lock_deadline -= 30
+        before = client.get("/api/status").json()["auto_lock_remaining_seconds"]
+        refreshed = client.post(
+            "/api/activity", headers={"X-Cryptobox-CSRF": csrf}
+        )
+        assert refreshed.status_code == 200
+        remaining = refreshed.json()["auto_lock_remaining_seconds"]
+        assert remaining > before
+        assert 179 <= remaining <= 180
+
+        assert client.post(
+            "/api/lock", headers={"X-Cryptobox-CSRF": csrf}
+        ).status_code == 200
+        assert client.get("/api/status").json()["auto_lock_remaining_seconds"] is None
+        assert client.post(
+            "/api/activity", headers={"X-Cryptobox-CSRF": csrf}
+        ).status_code == 423
 
 
 def test_tree_hides_current_executable_only(tmp_path: Path, monkeypatch) -> None:
