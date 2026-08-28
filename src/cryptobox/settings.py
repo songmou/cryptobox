@@ -26,7 +26,7 @@ class AppSettings:
 def settings_path() -> Path:
     if sys.platform == "darwin":
         base = Path.home() / "Library" / "Application Support" / "Cryptobox"
-    elif os.name == "nt":
+    elif sys.platform == "win32":
         base = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Cryptobox"
     else:
         base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "cryptobox"

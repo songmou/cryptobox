@@ -95,7 +95,10 @@ def test_settings_path_uses_platform_conventions(tmp_path: Path, monkeypatch) ->
     monkeypatch.setattr(settings_module.sys, "platform", "darwin")
     assert settings_path() == tmp_path / "Library" / "Application Support" / "Cryptobox" / "settings.json"
 
+    monkeypatch.setattr(settings_module.sys, "platform", "win32")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-app-data"))
+    assert settings_path() == tmp_path / "local-app-data" / "Cryptobox" / "settings.json"
+
     monkeypatch.setattr(settings_module.sys, "platform", "linux")
-    monkeypatch.setattr(settings_module.os, "name", "posix")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     assert settings_path() == tmp_path / "xdg" / "cryptobox" / "settings.json"
