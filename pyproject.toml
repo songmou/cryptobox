@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cryptobox-local"
-version = "0.2.3"
+version = "0.2.5"
 description = "Local encrypted-file browser with a loopback-only web interface"
 readme = "README.md"
 requires-python = ">=3.11"
