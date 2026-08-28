@@ -30,7 +30,7 @@ const ZOOM_MIN = 0.1;
 const ZOOM_MAX = 8;
 const ACTIVITY_REPORT_INTERVAL = 5000;
 const MEDIA_HEARTBEAT_INTERVAL = 30000;
-const TREE_CHEVRON = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 4 6 6-6 6"/></svg>';
+const TREE_CHEVRON = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m8 5 5 5-5 5"/></svg>';
 
 function formatBytes(value = 0) {
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -485,16 +485,15 @@ function makeTreeNode(id, name, parentId = null, depth = 0) {
   return { id, name, parentId, depth, expanded: id === "", loaded: false, loading: false, entries: [], nextOffset: 0, hasMore: false, error: "" };
 }
 
-async function loadTreeNode(id = "", append = false) {
-  let node = state.treeNodes.get(id);
+async function fetchTreeNode(nodes, id = "", append = false) {
+  let node = nodes.get(id);
   if (!node) {
     node = makeTreeNode(id, id ? "文件夹" : "根目录");
-    state.treeNodes.set(id, node);
+    nodes.set(id, node);
   }
   if (node.loading) return;
   node.loading = true;
   node.error = "";
-  renderTree();
   try {
     const offset = append ? node.nextOffset : 0;
     const data = await api(`/api/tree?path_id=${encodeURIComponent(id)}&offset=${offset}&limit=500`);
@@ -504,13 +503,27 @@ async function loadTreeNode(id = "", append = false) {
     node.loaded = true;
     for (const entry of data.entries) {
       if (entry.kind === "directory") {
-        const existing = state.treeNodes.get(entry.id);
+        const existing = nodes.get(entry.id);
         if (existing) { existing.name = entry.name; existing.parentId = id; existing.depth = node.depth + 1; }
-        else state.treeNodes.set(entry.id, makeTreeNode(entry.id, entry.name, id, node.depth + 1));
+        else nodes.set(entry.id, makeTreeNode(entry.id, entry.name, id, node.depth + 1));
       }
     }
   } catch (error) { node.error = error.message; }
-  finally { node.loading = false; renderTree(); }
+  finally { node.loading = false; }
+}
+
+async function loadTreeNode(id = "", append = false) {
+  let node = state.treeNodes.get(id);
+  if (!node) {
+    node = makeTreeNode(id, id ? "文件夹" : "根目录");
+    state.treeNodes.set(id, node);
+  }
+  if (node.loading) return;
+  node.loading = true;
+  renderTree();
+  node.loading = false;
+  await fetchTreeNode(state.treeNodes, id, append);
+  renderTree();
 }
 
 function renderTreeEntries(node, container) {
@@ -564,8 +577,36 @@ function appendTreeMessage(container, depth, message, error = false) {
   container.appendChild(row);
 }
 
+function captureTreeViewState() {
+  const tree = $("#fileTree");
+  const active = document.activeElement;
+  const row = active?.closest?.(".tree-row");
+  let focusTarget = "";
+  if (active?.classList?.contains("tree-toggle")) focusTarget = "toggle";
+  else if (active?.classList?.contains("tree-name")) focusTarget = "name";
+  else if (row === active) focusTarget = "row";
+  return {
+    scrollTop: tree?.scrollTop || 0,
+    focusId: row?.dataset.id ?? null,
+    focusTarget,
+  };
+}
+
+function restoreTreeViewState(viewState) {
+  const tree = $("#fileTree");
+  if (!tree || !viewState) return;
+  tree.scrollTop = viewState.scrollTop;
+  if (viewState.focusId === null) return;
+  const row = [...tree.querySelectorAll(".tree-row")].find((candidate) => candidate.dataset.id === viewState.focusId);
+  if (!row) return;
+  const target = viewState.focusTarget === "toggle" ? row.querySelector(".tree-toggle")
+    : viewState.focusTarget === "name" ? row.querySelector(".tree-name") : row;
+  target?.focus({ preventScroll: true });
+}
+
 function renderTree() {
   const tree = $("#fileTree");
+  const viewState = captureTreeViewState();
   tree.replaceChildren();
   const root = state.treeNodes.get("");
   if (!root) return;
@@ -574,6 +615,8 @@ function renderTree() {
   rootRow.setAttribute("role", "treeitem");
   rootRow.setAttribute("aria-expanded", "true");
   rootRow.tabIndex = 0;
+  rootRow.dataset.id = "";
+  rootRow.dataset.kind = "directory";
   rootRow.innerHTML = `<span class="tree-toggle fixed" aria-hidden="true">${TREE_CHEVRON}</span><span class="file-icon">${FILE_ICONS.directory}</span><button class="tree-name" type="button">根目录</button><span></span>`;
   rootRow.querySelector(".tree-name").addEventListener("click", () => selectDirectory(""));
   tree.appendChild(rootRow);
@@ -581,6 +624,7 @@ function renderTree() {
   else if (root.error) appendTreeMessage(tree, 1, root.error, true);
   else if (root.loaded && !root.entries.length) appendTreeMessage(tree, 1, "此目录为空");
   if (root.loaded) renderTreeEntries(root, tree);
+  restoreTreeViewState(viewState);
 }
 
 async function toggleDirectory(id, force = null) {
@@ -610,11 +654,55 @@ function handleTreeKey(event, entry) {
   }
 }
 
+function findTreeEntry(nodes, id, kind = null) {
+  for (const node of nodes.values()) {
+    const entry = node.entries.find((candidate) => candidate.id === id && (!kind || candidate.kind === kind));
+    if (entry) return { entry, parentId: node.id };
+  }
+  return null;
+}
+
 async function refreshTreePreservingExpansion() {
-  const expanded = [...state.treeNodes.values()].filter((node) => node.expanded && node.id).sort((a, b) => a.depth - b.depth).map((node) => node.id);
-  state.treeNodes = new Map([["", makeTreeNode("", "根目录")]]);
-  await loadTreeNode("");
-  for (const id of expanded) if (state.treeNodes.has(id)) await toggleDirectory(id, true);
+  const previousNodes = state.treeNodes;
+  const expanded = [...previousNodes.values()]
+    .filter((node) => node.expanded && node.id)
+    .sort((a, b) => a.depth - b.depth)
+    .map((node) => node.id);
+  const selectedFileParent = state.selected ? findTreeEntry(previousNodes, state.selected.id, "file")?.parentId : null;
+  const nodesToLoad = new Set(expanded);
+  for (let id = selectedFileParent; id; id = previousNodes.get(id)?.parentId || "") nodesToLoad.add(id);
+  for (let id = state.selectedDirectory ? previousNodes.get(state.selectedDirectory)?.parentId : null; id; id = previousNodes.get(id)?.parentId || "") nodesToLoad.add(id);
+
+  const refreshed = new Map([["", makeTreeNode("", "根目录")]]);
+  await fetchTreeNode(refreshed, "");
+  const orderedIds = [...nodesToLoad].sort((a, b) => (previousNodes.get(a)?.depth || 0) - (previousNodes.get(b)?.depth || 0));
+  for (const id of orderedIds) {
+    const node = refreshed.get(id);
+    if (!node) continue;
+    node.expanded = expanded.includes(id);
+    await fetchTreeNode(refreshed, id);
+  }
+  const failedNode = [...refreshed.values()].find((node) => node.error);
+  if (failedNode) {
+    toast(`文件列表刷新失败：${failedNode.error}`);
+    return;
+  }
+
+  const viewState = captureTreeViewState();
+  const refreshedSelection = state.selected ? findTreeEntry(refreshed, state.selected.id, "file")?.entry : null;
+  const selectedFileMissing = Boolean(state.selected && !refreshedSelection);
+  if (refreshedSelection) state.selected = refreshedSelection;
+  if (state.selectedDirectory && !refreshed.has(state.selectedDirectory)) state.selectedDirectory = "";
+  state.treeNodes = refreshed;
+  if (selectedFileMissing) {
+    clearActivePreview();
+    state.selected = null;
+    $("#downloadButton").disabled = true;
+    $("#previewTitle").textContent = "选择文件";
+    previewMessage("此前选择的文件已不存在，请重新选择。", "!", "preview-warning");
+  }
+  renderTree();
+  restoreTreeViewState(viewState);
 }
 
 async function previewFile(entry) {

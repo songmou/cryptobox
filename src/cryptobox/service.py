@@ -16,6 +16,8 @@ from .vault import VaultManager, VaultSession
 
 LOGGER = logging.getLogger(__name__)
 
+_MUTATING_EVENT_TYPES = frozenset({"created", "modified", "deleted", "moved"})
+
 
 class _ChangeHandler(FileSystemEventHandler):
     def __init__(self, root: Path, loop: asyncio.AbstractEventLoop, event: asyncio.Event):
@@ -24,6 +26,11 @@ class _ChangeHandler(FileSystemEventHandler):
         self.event = event
 
     def on_any_event(self, event: FileSystemEvent) -> None:
+        # Watchdog also reports read-only lifecycle events such as opened,
+        # closed, and closed_no_write. Previewing an encrypted file necessarily
+        # opens it, but must not schedule a new vault scan.
+        if event.event_type not in _MUTATING_EVENT_TYPES:
+            return
         try:
             relative = Path(event.src_path).relative_to(self.root)
         except (ValueError, TypeError):

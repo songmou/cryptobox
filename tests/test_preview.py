@@ -9,6 +9,8 @@ from cryptobox.preview import content_media_type, preview_kind
     ("name", "expected"),
     [
         ("photo.JPEG", "image"),
+        ("photo.HEIC", "image"),
+        ("alternate.HeIf", "image"),
         ("diagram.svg", "svg"),
         ("movie.mp4", "video"),
         ("voice.opus", "audio"),
@@ -47,3 +49,8 @@ def test_office_and_pdf_media_types_do_not_depend_on_platform_registry() -> None
     assert content_media_type("sheet.xlsx") == (
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
+
+def test_heic_media_types_are_explicit_and_case_insensitive() -> None:
+    assert content_media_type("photo.HEIC") == "image/heic"
+    assert content_media_type("alternate.HeIf") == "image/heif"

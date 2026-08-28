@@ -32,18 +32,18 @@
         <p id="accessDescription">密码只用于本机解锁，不会离开这台设备。</p>
         <div id="lockNotice" class="notice hidden" role="status"></div>
 
-        <form id="unlockForm" class="stack hidden">
-          <label>保险库密码<input id="unlockPassword" type="password" autocomplete="current-password" required></label>
+        <form id="unlockForm" class="stack hidden" autocomplete="off">
+          <label>保险库密码<input id="unlockPassword" type="password" autocomplete="off" required></label>
           <button class="primary" type="submit">解锁并扫描</button>
         </form>
 
-        <form id="initForm" class="stack hidden">
+        <form id="initForm" class="stack hidden" autocomplete="off">
           <label>保险库目录
             <div class="inline-field"><input id="rootPath" type="text" spellcheck="false"><button id="applyRoot" type="button" class="secondary">应用</button></div>
           </label>
           <div class="summary" id="rootSummary"><span>文件 —</span><span>容量 —</span></div>
-          <label>设置密码<input id="initPassword" type="password" autocomplete="new-password" required></label>
-          <label>再次输入<input id="initConfirmation" type="password" autocomplete="new-password" required></label>
+          <label>设置密码<input id="initPassword" type="password" autocomplete="off" required></label>
+          <label>再次输入<input id="initConfirmation" type="password" autocomplete="off" required></label>
           <div class="warning">忘记密码将无法恢复。加密前请确保重要文件已有独立备份。</div>
           <button class="primary" type="submit">初始化并加密</button>
         </form>

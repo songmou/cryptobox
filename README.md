@@ -35,7 +35,7 @@ python3.13 -m venv .venv
 | 类型 | 支持格式 | 说明 |
 | --- | --- | --- |
 | PDF | `pdf` | 使用浏览器 PDF 阅读器，支持 Range 请求 |
-| 图片 | `png`、`jpg`、`jpeg`、`gif`、`webp`、`bmp`、`ico`、`avif`、`svg` | SVG 在无同源权限沙箱中清理后显示 |
+| 图片 | `png`、`jpg`、`jpeg`、`gif`、`webp`、`bmp`、`ico`、`avif`、`heic`、`heif`、`svg` | HEIC/HEIF 能否显示取决于浏览器原生解码支持；SVG 在无同源权限沙箱中清理后显示 |
 | 音视频 | `mp3`、`wav`、`flac`、`m4a`、`aac`、`ogg`、`opus`、`mp4`、`webm`、`mov`、`m4v`、`ogv` | 能否播放取决于浏览器支持的编码 |
 | 文本 | 常见文本、代码、配置、JSON、XML、YAML、TOML、INI、无扩展名 UTF-8 文本 | 最大 5 MB；HTML 可安全渲染，脚本和表单会被移除 |
 | Markdown / 表格 | `md`、`markdown`、`csv`、`tsv` | Markdown 不执行内嵌 HTML；CSV/TSV 显示为表格 |

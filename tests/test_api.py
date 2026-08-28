@@ -64,6 +64,9 @@ def test_static_ui_integrates_workspace_actions_into_header_and_settings(tmp_pat
     header = html[html.index('<header class="topbar">'):html.index("</header>")]
     assert all(item in header for item in ("previewTitle", "drawerButton", "downloadButton", "exportFolderButton"))
     assert 'id="settingsButton" class="icon-button settings-button hidden"' in header
+    assert '<form id="unlockForm" class="stack hidden" autocomplete="off">' in html
+    assert '<form id="initForm" class="stack hidden" autocomplete="off">' in html
+    assert html.count('type="password" autocomplete="off"') == 3
     settings_start = html.index('<section id="settingsDialog"')
     settings_dialog = html[settings_start:html.index("</form>", settings_start)]
     assert all(item in settings_dialog for item in ("verifyButton", "passwordButton", "lockButton", "shutdownButton"))
@@ -72,6 +75,8 @@ def test_static_ui_integrates_workspace_actions_into_header_and_settings(tmp_pat
     assert "moreMenu" not in html
     assert 'if (!state.status?.unlocked || state.locking) return;' in script
     assert '$("#settingsButton").classList.add("hidden")' in script
+    assert '$("#unlockPassword").value = "";' in script
+    assert '$("#initPassword").value = $("#initConfirmation").value = "";' in script
 
 
 def test_bootstrap_is_one_time_and_range_is_exact(tmp_path: Path) -> None:
@@ -134,6 +139,24 @@ def test_pdf_content_is_inline_and_same_origin_embeddable(tmp_path: Path) -> Non
         assert "switchRootButton" in app_script
         assert "尝试以文本打开" in app_script
         assert "FILE_ICONS" in app_script
+
+
+def test_heic_content_uses_native_image_preview_without_conversion(tmp_path: Path) -> None:
+    payload = b"\x00\x00\x00\x18ftypheic" + bytes(range(64))
+    runtime = prepared_file_runtime(tmp_path, "CAPTURE.HEIC", payload)
+    app = create_app(runtime, "heic-token")
+
+    with TestClient(app) as client:
+        client.get("/?token=heic-token")
+        entry = client.get("/api/tree").json()["entries"][0]
+        assert entry["preview_kind"] == "image"
+        assert entry["media_type"] == "image/heic"
+
+        content = client.get(f"/api/content/{entry['id']}")
+        assert content.status_code == 200
+        assert content.content == payload
+        assert content.headers["content-type"] == "image/heic"
+        assert content.headers["content-disposition"].startswith("inline;")
 
 
 def test_host_and_csrf_are_enforced(tmp_path: Path) -> None:

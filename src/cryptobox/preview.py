@@ -24,7 +24,7 @@ PreviewKind = Literal[
 ]
 
 _PREVIEW_EXTENSIONS: dict[PreviewKind, frozenset[str]] = {
-    "image": frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".avif"}),
+    "image": frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".avif", ".heic", ".heif"}),
     "svg": frozenset({".svg"}),
     "video": frozenset({".mp4", ".webm", ".mov", ".m4v", ".ogv"}),
     "audio": frozenset({".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus"}),
@@ -64,6 +64,8 @@ _MEDIA_TYPES = {
     ".epub": "application/epub+zip",
     ".flac": "audio/flac",
     ".gif": "image/gif",
+    ".heic": "image/heic",
+    ".heif": "image/heif",
     ".ico": "image/x-icon",
     ".jpeg": "image/jpeg",
     ".jpg": "image/jpeg",
@@ -116,4 +118,3 @@ def content_media_type(name: str) -> str:
         return explicit
     guessed = mimetypes.guess_type(name)[0]
     return guessed or "application/octet-stream"
-

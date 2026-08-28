@@ -101,11 +101,12 @@ button:disabled { opacity: .38; cursor: default; transform: none; }
 .tree-row { min-height: 44px; display: grid; grid-template-columns: 26px 24px minmax(0, 1fr) auto; gap: 4px; align-items: center; padding: 0 8px 0 calc(5px + var(--depth, 0) * 17px); border-radius: 9px; color: var(--text-soft); user-select: none; }
 .tree-row:hover, .tree-row.active { background: color-mix(in srgb, var(--mint) 9%, transparent); }
 .tree-row.unencrypted { color: var(--warning); }
-.tree-toggle { width: 26px; height: 34px; min-width: 0; padding: 0; display: grid; place-items: center; align-self: center; color: var(--muted); background: transparent; line-height: 0; }
-.tree-toggle:hover { transform: none; }
-.tree-toggle svg { display: block; width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform .15s ease; }
+.tree-toggle { width: 26px; height: 26px; min-width: 0; padding: 0; display: grid; place-items: center; align-self: center; color: var(--muted); background: transparent; border: 1px solid transparent; border-radius: 8px; line-height: 0; transition: color .15s ease, background-color .15s ease, border-color .15s ease; }
+.tree-toggle:hover { color: var(--text); background: color-mix(in srgb, var(--mint) 9%, transparent); border-color: color-mix(in srgb, var(--mint) 13%, transparent); transform: none; }
+.tree-toggle:focus-visible { outline: 2px solid color-mix(in srgb, var(--mint) 70%, transparent); outline-offset: 1px; }
+.tree-toggle svg { display: block; width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; transition: transform .18s ease; }
 .tree-toggle[aria-expanded="true"] svg, .tree-toggle.fixed svg { transform: rotate(90deg); }
-.tree-toggle.fixed { pointer-events: none; }
+.tree-toggle.fixed { pointer-events: none; border-color: transparent; background: transparent; }
 .tree-spacer { width: 26px; }
 .tree-name { min-height: 44px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; background: transparent; padding: 0 4px; border-radius: 5px; color: inherit; font-size: 13px; }
 .file-icon { color: var(--mint); display: grid; place-items: center; }
