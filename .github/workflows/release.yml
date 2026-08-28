@@ -24,8 +24,10 @@ jobs:
           python-version: "3.13"
       - name: Install
         run: pip install .[dev]
+      - name: Test
+        run: python -m pytest
       - name: Build with PyInstaller
-        run: pyinstaller --clean --noconfirm cryptobox.spec
+        run: python -m PyInstaller --clean --noconfirm cryptobox.spec
       - name: Compute binary name
         id: meta
         shell: bash
@@ -33,11 +35,20 @@ jobs:
           TAG="${GITHUB_REF_NAME#v}"
           if [[ "$RUNNER_OS" == "Windows" ]]; then BIN="cryptobox-${TAG}.exe"; else BIN="cryptobox-${TAG}"; fi
           echo "bin=$BIN" >> "$GITHUB_OUTPUT"
+      - name: Compute SHA256
+        shell: bash
+        run: >-
+          python -c "from pathlib import Path; import hashlib;
+          p=Path(r'dist/${{ steps.meta.outputs.bin }}');
+          p.with_name(p.name + '.sha256').write_text(hashlib.sha256(p.read_bytes()).hexdigest().lower()
+          + '  ' + p.name + '\n', encoding='ascii')"
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: cryptobox-${{ matrix.os }}
-          path: dist/${{ steps.meta.outputs.bin }}
+          path: |
+            dist/${{ steps.meta.outputs.bin }}
+            dist/${{ steps.meta.outputs.bin }}.sha256
 
   release:
     needs: build

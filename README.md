@@ -163,5 +163,45 @@ dist\cryptobox-0.1.0.exe --root "D:\cryptofile"
 | Windows | `scripts/build.ps1` | `powershell -ExecutionPolicy Bypass -File scripts\build.ps1` |
 | macOS / Linux | `scripts/build.sh` | `bash scripts/build.sh` |
 
-- 产物：Windows 为 `dist\cryptobox-<版本>.exe`（如 `dist\cryptobox-0.1.0.exe`），macOS / Linux 为 `dist/cryptobox-<版本>`（如 `dist/cryptobox-0.1.0`）（单文件，已内嵌 `static` 资源与依赖），可直接在没有 Python 环境的同平台机器上运行。
+- 产物：Windows 为 `dist\cryptobox-<版本>.exe`（如 `dist\cryptobox-0.1.0.exe`）以及对应的 `.exe.sha256` 校验文件，macOS / Linux 为 `dist/cryptobox-<版本>`（如 `dist/cryptobox-0.1.0`）（单文件，已内嵌 `static` 资源与依赖），可直接在没有 Python 环境的同平台机器上运行。
 - 编译脚本同样带平台守卫：在 macOS / Linux 上误跑 `build.ps1`、或在 Windows 上误跑 `build.sh` 都会提示后退出。
+- Windows 构建会同步 `.[dev]` 依赖、输出 Python/PyInstaller/关键依赖和 Git commit、运行完整测试，再使用 PyInstaller `--clean` 打包。打包后会记录 SHA256、显示 Authenticode 状态，并在系统提供 Microsoft Defender PowerShell 模块时扫描最终 EXE。
+
+### Windows Defender 误报排查
+
+PyInstaller 单文件程序可能被安全软件的启发式或机器学习规则误报，但检测名称本身不能证明文件安全。Cryptobox 还会在用户明确选择目录后递归加密文件，因此只有从受控源码和干净依赖环境构建、测试并核对哈希后，才能按误报流程处理。
+
+如果 PowerShell 提示“文件包含病毒或潜在的垃圾软件”，不要关闭 Defender，也不要把项目目录、保险库目录、用户目录或整个磁盘加入排除项。先在管理员 PowerShell 中更新安全情报并读取最近检测：
+
+```powershell
+Update-MpSignature
+
+$d = Get-MpThreatDetection |
+  Where-Object { $_.Resources -match 'cryptobox-.*\.exe' } |
+  Sort-Object InitialDetectionTime -Descending |
+  Select-Object -First 1
+
+$d | Format-List ThreatID,InitialDetectionTime,ActionSuccess,Resources
+Get-MpThreat -ThreatID $d.ThreatID |
+  Format-List ThreatName,SeverityID,CategoryID,DidThreatExecute,IsActive
+```
+
+如果当前位于 `dist` 目录，查询上级虚拟环境时路径必须包含 `..\`：
+
+```powershell
+& ..\.venv\Scripts\python.exe -m PyInstaller --version
+& ..\.venv\Scripts\python.exe -m pip show pyinstaller pyinstaller-hooks-contrib cryptography
+```
+
+若怀疑旧虚拟环境或旧 PyInstaller 缓存，先回到项目根目录，保留旧环境并创建全新环境，再运行构建脚本：
+
+```powershell
+Set-Location F:\cryptosoft\cryptobox
+Rename-Item .venv ".venv-old-$(Get-Date -Format yyyyMMdd-HHmmss)"
+py -3.13 -m venv .venv
+powershell -ExecutionPolicy Bypass -File scripts\build.ps1
+```
+
+干净构建仍被检测时，只恢复这一份新构建的 EXE用于提交分析，不要执行旧产物。通过 [Microsoft Security Intelligence 文件分析入口](https://www.microsoft.com/en-us/wdsi/filesubmission)选择 **Software developer**，提交 EXE、检测名称、`.sha256`、PyInstaller 版本、Git commit、项目用途和复现步骤。等待 Microsoft 最终判定并更新 Defender 安全情报后重新扫描。PyInstaller 官方同样建议将误报提交给对应安全软件厂商，随机改代码或反复换版本不能稳定解决问题：<https://github.com/pyinstaller/pyinstaller/blob/develop/.github/ISSUE_TEMPLATE/antivirus.md>。
+
+当前 Windows 产物没有 Authenticode 签名。仅在自己的机器上使用时无需购买公共代码签名证书；自签名证书也不会自动获得 SmartScreen 信誉。未来公开分发时，应使用 Microsoft Artifact Signing 或受信任的代码签名证书，并保持连续发布使用同一发布者身份：<https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation>。
