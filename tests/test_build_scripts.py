@@ -42,3 +42,32 @@ def test_release_workflow_tests_before_building() -> None:
     assert "hashlib.sha256" in workflow
     assert "dist/${{ steps.meta.outputs.bin }}.sha256" in workflow
     assert workflow.index("run: python -m pytest") < workflow.index("python -m PyInstaller")
+
+
+def test_run_scripts_forward_network_arguments() -> None:
+    shell = (ROOT / "scripts" / "run-dev.sh").read_text(encoding="utf-8")
+    powershell = (ROOT / "scripts" / "run-dev.ps1").read_text(encoding="utf-8-sig")
+
+    assert 'EXTRA_ARGS=("$@")' in shell
+    assert '"${EXTRA_ARGS[@]}"' in shell
+    assert "$ExtraArgs" in powershell
+    assert "@ExtraArgs" in powershell
+
+
+def test_root_dist_launchers_use_the_versioned_artifact_and_forward_arguments() -> None:
+    macos = (ROOT / "start-cryptobox.command").read_text(encoding="utf-8")
+    windows = (ROOT / "start-cryptobox.ps1").read_text(encoding="utf-8")
+    wrapper = (ROOT / "start-cryptobox.cmd").read_text(encoding="utf-8")
+
+    assert 'dist/cryptobox-$version' in macos
+    assert '"$binary" --root "$vault" "$@"' in macos
+    assert "$HOME/CryptoboxVault" in macos
+    assert "-newer \"$binary\"" in macos
+
+    assert 'dist\\cryptobox-$Version.exe' in windows
+    assert "& $Binary --root $Vault @ExtraArgs" in windows
+    assert 'Join-Path $env:USERPROFILE "CryptoboxVault"' in windows
+    assert "LastWriteTimeUtc -gt $binaryTimestamp" in windows
+
+    assert "start-cryptobox.ps1" in wrapper
+    assert "%*" in wrapper

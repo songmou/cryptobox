@@ -1,6 +1,6 @@
 # Cryptobox
 
-Cryptobox 是一个本机加密文件浏览器。它递归保护指定目录中的普通文件，并通过仅绑定回环地址的 Web 页面提供文件列表和离线文件预览。
+Cryptobox 是一个加密文件浏览器。它递归保护指定目录中的普通文件，并通过本机 HTTP 或直接启用 TLS 的 Web 页面提供文件列表和离线文件预览。
 
 ## 重要警告
 
@@ -20,11 +20,62 @@ python3.13 -m venv .venv
 .venv/bin/cryptobox --root /path/to/dedicated/vault
 ```
 
-程序会自动打开一次性本机访问地址。若不希望自动打开浏览器：
+程序会自动打开本机页面；未初始化时打开的是一次性初始化地址。若不希望自动打开浏览器：
 
 ```bash
 .venv/bin/cryptobox --root /path/to/vault --no-open
 ```
+
+默认仍只监听 `127.0.0.1`。初始化后的保险库会显示密码登录页；尚未初始化时，必须使用控制台打印的、15 分钟有效的一次性初始化 URL。
+
+## HTTPS 与远程访问
+
+监听任何非回环地址时，Cryptobox 强制要求 HTTPS 和明确的公开 URL。使用已有证书：
+
+```bash
+cryptobox --root /path/to/vault \
+  --host 0.0.0.0 --port 8787 \
+  --public-url https://203.0.113.10:8787 \
+  --tls-cert /path/to/fullchain.pem \
+  --tls-key /path/to/privkey.pem \
+  --no-open
+```
+
+证书的 SAN 必须包含 `--public-url` 中的域名或 IP。若同一服务还通过其他地址访问，可重复传入 `--allowed-origin https://host:port`，证书也必须覆盖这些地址。
+
+测试、内网或已能安全分发信任证书的环境可以使用持久化自签名证书：
+
+```bash
+cryptobox --root /path/to/vault \
+  --host 0.0.0.0 \
+  --public-url https://192.168.1.20:8787 \
+  --self-signed --no-open
+```
+
+自签名证书保存在系统用户配置目录，程序会打印 SHA-256 指纹。必须通过另一条可信渠道核对指纹并把证书安装为可信证书；公网使用时不要直接忽略浏览器警告，否则无法防止中间人攻击。
+
+可选来源白名单接受单个 IP 或 CIDR，可重复指定；回环地址始终允许：
+
+```bash
+cryptobox --root /path/to/vault \
+  --host 0.0.0.0 \
+  --public-url https://vault.example.com:8787 \
+  --tls-cert /path/to/fullchain.pem --tls-key /path/to/privkey.pem \
+  --allow-client 198.51.100.24 \
+  --allow-client 10.20.0.0/16
+```
+
+Cryptobox 直接使用 TCP 对端地址并忽略 `X-Forwarded-For`；当前模式不支持在反向代理后恢复真实客户端 IP。应用不会修改系统防火墙、路由器端口映射、云安全组或 DNS。
+
+公网登录保护规则如下：
+
+- 同一 IP 在 5 分钟内失败 5 次，封禁登录 15 分钟。
+- 全局在 5 分钟内失败 30 次，封禁所有登录 15 分钟。
+- Argon2 密码验证串行执行；封禁请求不会进入昂贵的密码计算。
+- 仅保留一个活动登录会话；新设备登录会使旧设备会话失效。
+- 安全日志记录登录、封禁及被拒绝的 IP，但不会记录密码、Cookie、令牌或完整查询 URL。
+
+封禁状态只保存在进程内，重启后清除。公网部署应使用长且唯一的密码短语，并优先结合 VPN、来源白名单和主机防火墙。
 
 首次使用在 Web 中确认目录并设置两次相同的密码，提交后开始初始化和加密。后续启动同样在 Web 中输入密码。Cryptobox 会在系统用户配置目录中只记录上次打开的保险库路径；未传 `--root` 时自动恢复该目录，显式 `--root` 始终优先。设置文件不包含密码、密钥或文件内容。
 
@@ -64,14 +115,14 @@ npm run build:preview
 ```
 
 ```bash
-.venv/bin/pyinstaller --clean --noconfirm cryptobox.spec
+.venv/bin/python -m PyInstaller --clean --noconfirm cryptobox.spec
 ```
 
 输出位于 `dist/cryptobox-<版本>`（如 `dist/cryptobox-0.1.0`）。PyInstaller 不是交叉编译器，Windows、macOS、Linux 必须分别构建。
 
 ## 使用边界
 
-- Web 服务固定绑定 `127.0.0.1`，不能作为公网服务使用。
+- 默认 Web 服务绑定 `127.0.0.1`；非回环监听必须显式配置 HTTPS、公开 URL 和证书。
 - Web 为只读：可以预览、下载、导出目录、校验和修改密码，不能上传、移动、重命名或删除。
 - 文件列表显示文件类型图标以及“已加密 / 未加密”状态；未加密或加密失败的文件不会通过预览、下载或导出接口读取。
 - `.cryptobox` 控制目录、当前正在运行的 Cryptobox 可执行文件和 Cryptobox 临时文件不会被加密。只排除当前可执行文件，不会排除它所在目录中的其他文件。
@@ -105,7 +156,7 @@ npm run build:preview
    ```powershell
    cryptobox --root "D:\cryptofile"
    ```
-   程序会自动打开浏览器访问一次性本机地址 `127.0.0.1`；`--no-open` 可关闭自动打开。
+   程序会自动打开浏览器访问本机地址 `127.0.0.1`；未初始化时使用一次性初始化 URL，`--no-open` 可关闭自动打开。
 
 > 不激活也可直接调用可执行入口：
 > `D:\cryptobox\.venv\Scripts\cryptobox.exe --root "D:\cryptofile"`
@@ -138,6 +189,21 @@ dist\cryptobox-0.1.0.exe --root "D:\cryptofile"
 
 项目在 `scripts/` 下提供了跨平台的一键脚本，已内置**平台守卫**：在错误的平台上运行会提示并退出，不会误执行。脚本会自动选择运行入口（优先 `dist/` 下的编译产物，其次 `.venv` 虚拟环境入口，最后回退到 `python -m cryptobox.main`）；编译脚本在缺少 `.venv` 时会自动创建并安装依赖。
 
+### 直接启动 dist 产物
+
+项目根目录提供了只启动当前版本 `dist` 产物的快捷脚本，不会回退到虚拟环境或源码：
+
+| 平台 | 双击入口 | 命令行入口 |
+| --- | --- | --- |
+| Windows | `start-cryptobox.cmd` | `start-cryptobox.cmd "D:\my\vault"` |
+| macOS | `start-cryptobox.command` | `./start-cryptobox.command /path/to/vault` |
+
+- 不传目录时，默认使用当前用户主目录下的 `CryptoboxVault`。
+- 第一个参数是保险库目录，后续参数会原样传给 Cryptobox。
+- 脚本严格按 `pyproject.toml` 的版本号选择 `dist/cryptobox-<版本>`，避免误启动无版本名的旧产物。
+- 如果源码比 `dist` 产物新，脚本会明确警告需要更新版本号并重新构建。
+- macOS 如果阻止首次运行，请在“系统设置 → 隐私与安全性”中确认程序来源；脚本不会自动移除隔离属性。
+
 ### 启动
 
 | 平台 | 脚本 | 在项目根目录执行的命令 |
@@ -154,7 +220,8 @@ dist\cryptobox-0.1.0.exe --root "D:\cryptofile"
   # macOS / Linux，指定自定义保险库
   bash scripts/run-dev.sh /path/to/vault
   ```
-- 关于 iOS：本项目是**桌面**程序（仅绑定 `127.0.0.1` 的 Web 界面），iOS 不适用；在 macOS 上请使用 `scripts/run-dev.sh`。
+- iOS 不能运行 Cryptobox 服务端，但可以作为远程 HTTPS 客户端访问运行在桌面或服务器上的实例。自签名模式需要先在 iOS 中正确安装并信任证书。
+- 保险库目录后的其他参数会原样传给 Cryptobox，例如：`bash scripts/run-dev.sh /path/to/vault --host 0.0.0.0 --public-url https://192.168.1.20:8787 --self-signed --no-open`。
 
 ### 编译（打包为独立可执行文件）
 

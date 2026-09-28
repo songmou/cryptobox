@@ -13,7 +13,7 @@
       <header class="topbar">
         <div class="brand"><span class="brand-mark">C</span><span>Cryptobox</span></div>
         <div class="preview-heading header-preview workspace-header-control hidden">
-          <button id="drawerButton" class="secondary mobile-only" type="button" aria-label="打开文件列表" aria-controls="sidebar" aria-expanded="false">文件</button>
+          <button id="drawerButton" class="secondary mobile-only" type="button" aria-label="打开目录列表" aria-controls="sidebar" aria-expanded="false">目录</button>
           <div><span class="eyebrow">PREVIEW</span><h2 id="previewTitle">选择文件</h2></div>
         </div>
         <div class="header-file-actions workspace-header-control hidden">
@@ -52,9 +52,9 @@
 
       <section id="workspace" class="workspace hidden">
         <div id="drawerScrim" class="drawer-scrim hidden"></div>
-        <aside class="sidebar" id="sidebar" aria-label="文件浏览器">
+        <aside class="sidebar" id="sidebar" aria-label="文件夹浏览器">
           <div class="sidebar-head">
-            <div><span class="eyebrow">VAULT</span><h3>文件</h3></div>
+            <div><span class="eyebrow">VAULT</span><h3>文件夹</h3></div>
             <div class="sidebar-actions">
               <button id="switchRootButton" class="icon-button" type="button" title="切换文件夹" aria-label="切换文件夹">⇄</button>
               <button id="rescanButton" class="icon-button" type="button" title="重新扫描" aria-label="重新扫描">↻</button>
@@ -63,16 +63,16 @@
           </div>
           <div class="root-label" id="rootLabel"></div>
           <div class="tree-help">点击箭头展开 · 点击名称选中目录</div>
-          <div class="file-tree" id="fileTree" role="tree" aria-label="保险库目录"></div>
+          <div class="file-tree" id="fileTree" role="tree" aria-label="保险库文件夹目录"></div>
         </aside>
 
         <section class="content">
           <div class="operation hidden" id="operationPanel">
             <div class="operation-row"><span id="operationText">正在扫描</span><span id="operationCount"></span></div>
-            <div class="progress"><i id="progressBar"></i></div>
+            <div class="progress" id="operationProgress" role="progressbar" aria-label="操作进度" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"><i id="progressBar"></i></div>
             <div id="operationErrors" class="operation-errors"></div>
           </div>
-          <div class="preview empty" id="preview"><div class="empty-state"><span>◇</span><p>从文件树中选择文件进行安全预览</p></div></div>
+          <div class="preview empty" id="preview"><div class="empty-state"><span>◇</span><p>从左侧选择文件夹以浏览文件</p></div></div>
         </section>
       </section>
 

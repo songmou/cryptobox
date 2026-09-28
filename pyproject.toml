@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cryptobox-local"
-version = "0.2.7"
-description = "Local encrypted-file browser with a loopback-only web interface"
+version = "0.2.8"
+description = "Encrypted-file browser with secure local and HTTPS remote access"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -40,4 +40,3 @@ cryptobox = ["static/*"]
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
-

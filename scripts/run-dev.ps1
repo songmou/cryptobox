@@ -14,6 +14,7 @@ Set-Location $ProjectDir
 
 # 保险库目录：第一个参数为 --root，否则使用默认
 $Vault = if ($args.Count -ge 1) { $args[0] } else { "D:\Kaung\cryptofile" }
+$ExtraArgs = if ($args.Count -gt 1) { @($args[1..($args.Count - 1)]) } else { @() }
 
 Write-Host "启动 Cryptobox"
 Write-Host "  平台   : Windows"
@@ -30,16 +31,15 @@ if (Test-Path ".\pyproject.toml") {
 $DistExe = "dist\cryptobox-$Version.exe"
 if (Test-Path $DistExe) {
     Write-Host "  入口   : $DistExe"
-    & $DistExe --root $Vault
+    & $DistExe --root $Vault @ExtraArgs
 } elseif (Test-Path ".venv\Scripts\cryptobox.exe") {
     Write-Host "  入口   : .venv\Scripts\cryptobox.exe"
-    & ".venv\Scripts\cryptobox.exe" --root $Vault
+    & ".venv\Scripts\cryptobox.exe" --root $Vault @ExtraArgs
 } elseif (Get-Command python -ErrorAction SilentlyContinue) {
     Write-Host "  入口   : python -m cryptobox.main"
-    python -m cryptobox.main --root $Vault
+    python -m cryptobox.main --root $Vault @ExtraArgs
 } else {
     Write-Host "错误：未找到 Python 且未构建 cryptobox，请先运行 scripts\build.ps1。" -ForegroundColor Red
     exit 1
 }
 exit $LASTEXITCODE
-

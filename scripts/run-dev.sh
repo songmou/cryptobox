@@ -16,6 +16,8 @@ cd "$project_dir"
 
 # 保险库目录：第一个参数为 --root，否则使用默认
 VAULT="${1:-$HOME/cryptofile}"
+if [ "$#" -gt 0 ]; then shift; fi
+EXTRA_ARGS=("$@")
 
 # 选择入口：优先 dist 编译产物，其次 venv，最后 python -m
 if [ -x "dist/cryptobox" ]; then
@@ -34,4 +36,4 @@ echo "  平台   : $OS"
 echo "  入口   : ${CMD[*]}"
 echo "  保险库 : $VAULT"
 echo ""
-exec "${CMD[@]}" --root "$VAULT"
+exec "${CMD[@]}" --root "$VAULT" "${EXTRA_ARGS[@]}"

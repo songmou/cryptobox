@@ -77,6 +77,10 @@ def test_static_ui_integrates_workspace_actions_into_header_and_settings(tmp_pat
     assert '$("#settingsButton").classList.add("hidden")' in script
     assert '$("#unlockPassword").value = "";' in script
     assert '$("#initPassword").value = $("#initConfirmation").value = "";' in script
+    assert "directories_only=true" in script
+    assert "new IntersectionObserver" in script
+    assert "directorySortBy" in script
+    assert 'id="operationProgress" role="progressbar"' in html
 
 
 def test_bootstrap_is_one_time_and_range_is_exact(tmp_path: Path) -> None:
@@ -282,6 +286,75 @@ def test_tree_shows_encrypted_and_plain_files_but_plain_content_is_rejected(tmp_
         assert entries["arrived-later.bin"]["size"] == len(b"not encrypted yet")
         assert client.get(f"/api/content/{entries['arrived-later.bin']['id']}").status_code == 409
         assert client.get(f"/api/download/{entries['arrived-later.bin']['id']}").status_code == 409
+
+
+def test_tree_supports_directory_filter_sorting_and_stable_pagination(tmp_path: Path) -> None:
+    runtime = prepared_file_runtime(tmp_path, "middle.txt", b"middle")
+    (tmp_path / "alpha-folder").mkdir()
+    (tmp_path / "zeta-folder").mkdir()
+    (tmp_path / "tiny.bin").write_bytes(b"1")
+    (tmp_path / "large.pdf").write_bytes(b"x" * 40)
+    (tmp_path / "another.txt").write_bytes(b"text")
+    timestamps = {
+        "alpha-folder": 1_700_000_001,
+        "zeta-folder": 1_700_000_005,
+        "tiny.bin": 1_700_000_002,
+        "large.pdf": 1_700_000_004,
+        "another.txt": 1_700_000_003,
+    }
+    for name, modified in timestamps.items():
+        os.utime(tmp_path / name, (modified, modified))
+    app = create_app(runtime, "tree-list-token")
+
+    with TestClient(app) as client:
+        client.get("/?token=tree-list-token")
+        directories = client.get("/api/tree?directories_only=true&limit=50").json()
+        assert directories["total_entries"] == 2
+        assert [entry["name"] for entry in directories["entries"]] == [
+            "alpha-folder",
+            "zeta-folder",
+        ]
+        assert all(entry["kind"] == "directory" for entry in directories["entries"])
+        assert all(entry["size"] is None for entry in directories["entries"])
+        assert all(entry["file_type"] == "folder" for entry in directories["entries"])
+        assert all("modified" in entry for entry in directories["entries"])
+
+        first = client.get("/api/tree?sort_by=name&sort_order=asc&offset=0&limit=2").json()
+        second = client.get(
+            f"/api/tree?sort_by=name&sort_order=asc&offset={first['next_offset']}&limit=2"
+        ).json()
+        third = client.get(
+            f"/api/tree?sort_by=name&sort_order=asc&offset={second['next_offset']}&limit=2"
+        ).json()
+        paged = first["entries"] + second["entries"] + third["entries"]
+        assert len(paged) == first["total_entries"] == 6
+        assert len({entry["id"] for entry in paged}) == 6
+        assert [entry["kind"] for entry in paged[:2]] == ["directory", "directory"]
+        assert first["has_more"] is True
+        assert third["has_more"] is False
+
+        for sort_by in ("name", "modified", "type", "size"):
+            for sort_order in ("asc", "desc"):
+                payload = client.get(
+                    f"/api/tree?sort_by={sort_by}&sort_order={sort_order}&limit=50"
+                ).json()
+                entries = payload["entries"]
+                kinds = [entry["kind"] for entry in entries]
+                assert kinds == sorted(kinds, key=lambda kind: kind == "file")
+                files = [entry for entry in entries if entry["kind"] == "file"]
+                field = {"name": "name", "modified": "modified", "type": "file_type", "size": "size"}[sort_by]
+                values = [entry[field].casefold() if isinstance(entry[field], str) else entry[field] for entry in files]
+                assert values == sorted(values, reverse=sort_order == "desc")
+
+
+def test_tree_rejects_invalid_sort_parameters(tmp_path: Path) -> None:
+    runtime = prepared_file_runtime(tmp_path, "protected.txt", b"protected")
+    app = create_app(runtime, "tree-sort-token")
+
+    with TestClient(app) as client:
+        client.get("/?token=tree-sort-token")
+        assert client.get("/api/tree?sort_by=owner").status_code == 422
+        assert client.get("/api/tree?sort_order=sideways").status_code == 422
 
 
 def test_tree_uses_full_path_stat_to_match_encrypted_index_on_windows(

@@ -34,6 +34,59 @@ def test_scan_encrypts_plain_files_and_uses_cache(tmp_path: Path) -> None:
     index.close()
 
 
+def test_scan_reports_progress_for_only_the_new_encryption_batch(tmp_path: Path, monkeypatch) -> None:
+    cached = tmp_path / "cached.txt"
+    cached.write_bytes(b"already protected")
+    session = VaultManager(tmp_path).create("correct horse battery staple")
+    index = VaultIndex(session.index_path, session.derive_key(b"index"))
+    tracker = StatusTracker()
+    assert scan_and_encrypt(tmp_path, session, index, tracker)["encrypted_files"] == 1
+
+    (tmp_path / "new-a.txt").write_bytes(b"a" * 10)
+    (tmp_path / "new-b.txt").write_bytes(b"b" * 20)
+    original_encrypt = scanner_module.encrypt_file
+    snapshots: list[dict[str, object]] = []
+
+    def recording_encrypt(path: Path, active_session):
+        snapshots.append(tracker.snapshot())
+        return original_encrypt(path, active_session)
+
+    monkeypatch.setattr(scanner_module, "encrypt_file", recording_encrypt)
+    result = scan_and_encrypt(tmp_path, session, index, tracker)
+
+    assert result["phase"] == "ready"
+    assert result["cached_files"] == 1
+    assert result["pending_files"] == 2
+    assert result["encrypted_files"] == 2
+    assert any(snapshot["pending_files"] == 2 for snapshot in snapshots)
+    assert any(snapshot["encrypted_files"] == 0 for snapshot in snapshots)
+    index.close()
+
+
+def test_failed_new_file_does_not_advance_successful_encryption_progress(
+    tmp_path: Path, monkeypatch
+) -> None:
+    (tmp_path / "good.txt").write_bytes(b"good")
+    (tmp_path / "bad.txt").write_bytes(b"bad")
+    session = VaultManager(tmp_path).create("correct horse battery staple")
+    index = VaultIndex(session.index_path, session.derive_key(b"index"))
+    original_encrypt = scanner_module.encrypt_file
+
+    def sometimes_fails(path: Path, active_session):
+        if path.name == "bad.txt":
+            raise OSError("simulated encryption failure")
+        return original_encrypt(path, active_session)
+
+    monkeypatch.setattr(scanner_module, "encrypt_file", sometimes_fails)
+    result = scan_and_encrypt(tmp_path, session, index, StatusTracker())
+
+    assert result["phase"] == "error"
+    assert result["pending_files"] == 2
+    assert result["encrypted_files"] == 1
+    assert len(result["errors"]) == 1
+    index.close()
+
+
 def test_scan_validates_changed_ciphertext_before_encrypting_plaintext(tmp_path: Path) -> None:
     encrypted = tmp_path / "existing.bin"
     encrypted.write_bytes(b"existing")

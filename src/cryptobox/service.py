@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+from collections.abc import Callable
 from pathlib import Path
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -58,6 +59,7 @@ class RuntimeState:
         self.auto_lock_task: asyncio.Task[None] | None = None
         self.auto_lock_deadline: float | None = None
         self.shutdown_event = asyncio.Event()
+        self.on_lock: Callable[[], None] | None = None
 
     @property
     def unlocked(self) -> bool:
@@ -162,6 +164,8 @@ class RuntimeState:
         self.session = None
         self.tracker.reset("locked")
         self.tracker.finish("locked")
+        if self.on_lock is not None:
+            self.on_lock()
 
     async def _scan(self) -> dict[str, object]:
         if not self.session or not self.index:

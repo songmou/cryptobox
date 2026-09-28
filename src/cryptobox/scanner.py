@@ -24,6 +24,7 @@ class OperationStatus:
     processed_files: int = 0
     cached_files: int = 0
     encrypted_files: int = 0
+    pending_files: int = 0
     total_bytes: int = 0
     processed_bytes: int = 0
     started_at: float | None = None
@@ -156,7 +157,7 @@ def scan_and_encrypt(
         tracker.finish("error")
         return tracker.snapshot()
 
-    tracker.update(phase="encrypting")
+    tracker.update(phase="encrypting", pending_files=len(pending))
     with ThreadPoolExecutor(max_workers=max(1, min(workers, MAX_WORKERS))) as pool:
         futures = {pool.submit(encrypt_file, path, session): (path, relative, old) for path, relative, old in pending}
         for future in as_completed(futures):

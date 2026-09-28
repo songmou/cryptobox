@@ -90,6 +90,30 @@ def test_explicit_root_wins_then_remembered_root_then_cwd(tmp_path: Path) -> Non
     assert select_root(None, config, cwd) == cwd.resolve()
 
 
+def test_network_tls_arguments_are_exposed() -> None:
+    args = parse_args(
+        [
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "9443",
+            "--public-url",
+            "https://vault.example:9443",
+            "--allowed-origin",
+            "https://192.0.2.10:9443",
+            "--allow-client",
+            "198.51.100.0/24",
+            "--self-signed",
+        ]
+    )
+    assert args.host == "0.0.0.0"
+    assert args.port == 9443
+    assert args.public_url == "https://vault.example:9443"
+    assert args.allowed_origin == ["https://192.0.2.10:9443"]
+    assert args.allow_client == ["198.51.100.0/24"]
+    assert args.self_signed is True
+
+
 def test_settings_path_uses_platform_conventions(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.setattr(settings_module.sys, "platform", "darwin")

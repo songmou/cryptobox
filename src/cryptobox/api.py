@@ -2,28 +2,28 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
 import re
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import quote
 
-from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .archive import stream_zip
-from .constants import CONTROL_DIR, FILE_MAGIC
+from . import __version__
 from .crypto import iter_decrypted, read_header_path
 from .errors import CryptoboxError, InvalidPassword, UnsafePath
+from .preview import content_media_type, preview_kind
 from .scanner import iter_regular_files, preview_root
 from .service import RuntimeState
 from .settings import AppSettings, load_settings, save_preferences
-from . import __version__
-from .preview import content_media_type, preview_kind
 from .util import (
     current_executable,
     display_name,
@@ -34,8 +34,18 @@ from .util import (
     safe_join,
     secure_compare,
 )
+from .web_security import (
+    AuthState,
+    LoginRateLimiter,
+    WebSecurityConfig,
+    normalize_client_ip,
+    normalize_origin,
+)
 
 _RANGE = re.compile(r"^bytes=(\d*)-(\d*)$")
+LOGGER = logging.getLogger(__name__)
+
+
 class InitRequest(BaseModel):
     password: str
     password_confirmation: str
@@ -63,7 +73,13 @@ class ZipRequest(BaseModel):
     ids: list[str] = Field(min_length=1, max_length=5000)
 
 
-def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
+def create_app(
+    runtime: RuntimeState,
+    bootstrap_token: str,
+    security: WebSecurityConfig | None = None,
+) -> FastAPI:
+    security = security or WebSecurityConfig.local_default()
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         try:
@@ -76,26 +92,79 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
     )
     static_dir = Path(__file__).with_name("static")
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
-    session_token = secrets.token_urlsafe(32)
-    csrf_token = secrets.token_urlsafe(24)
+    auth = AuthState()
+    limiter = LoginRateLimiter()
+    password_check = asyncio.Lock()
     bootstrap_used = False
     export_tickets: dict[str, list[tuple[Path, str]]] = {}
+    session_cookie = "__Host-cryptobox_session" if security.secure_cookies else "cryptobox_session"
+    csrf_cookie = "__Host-cryptobox_csrf" if security.secure_cookies else "cryptobox_csrf"
+    setup_cookie = "__Host-cryptobox_setup" if security.secure_cookies else "cryptobox_setup"
+
+    def revoke_session() -> None:
+        auth.revoke()
+
+    runtime.on_lock = revoke_session
+
+    def client_ip(request: Request) -> str:
+        return normalize_client_ip(request.client.host if request.client else None)
+
+    def set_cookie(response: Response, name: str, value: str, *, httponly: bool) -> None:
+        response.set_cookie(
+            name,
+            value,
+            httponly=httponly,
+            samesite="strict",
+            secure=security.secure_cookies,
+            path="/",
+        )
+
+    def set_session_cookie(response: Response) -> None:
+        set_cookie(response, session_cookie, auth.login(), httponly=True)
+
+    def clear_session_cookie(response: Response) -> None:
+        response.delete_cookie(
+            session_cookie,
+            path="/",
+            secure=security.secure_cookies,
+            httponly=True,
+        )
+
+    def set_setup_cookie(response: Response) -> None:
+        set_cookie(response, setup_cookie, auth.authorize_setup(), httponly=True)
+
+    def clear_setup_cookie(response: Response) -> None:
+        response.delete_cookie(setup_cookie, path="/", secure=security.secure_cookies, httponly=True)
 
     @app.middleware("http")
     async def security_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
-        host = request.headers.get("host", "").split(":", 1)[0].strip("[]").lower()
-        if host not in {"127.0.0.1", "localhost", "::1", "testserver"}:
+        remote = client_ip(request)
+        if not security.client_allowed(remote):
+            LOGGER.warning("security source_rejected ip=%s", remote)
+            return JSONResponse({"detail": "Client address is not allowed"}, status_code=403)
+        host = request.headers.get("host", "").lower()
+        if host not in security.allowed_hosts:
+            LOGGER.warning("security host_rejected ip=%s", remote)
             return JSONResponse({"detail": "Invalid Host header"}, status_code=400)
         origin = request.headers.get("origin")
-        if origin and not any(
-            origin.startswith(prefix)
-            for prefix in ("http://127.0.0.1:", "http://localhost:", "http://[::1]:")
+        normalized_origin: str | None = None
+        if origin:
+            try:
+                normalized_origin = normalize_origin(origin)
+            except ValueError:
+                normalized_origin = None
+        unsafe = request.method not in {"GET", "HEAD", "OPTIONS"}
+        if (origin and normalized_origin not in security.origins) or (
+            security.external and unsafe and not origin
         ):
+            LOGGER.warning("security origin_rejected ip=%s", remote)
             return JSONResponse({"detail": "Invalid Origin header"}, status_code=403)
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Cache-Control"] = "no-store"
+        if security.external:
+            response.headers["Strict-Transport-Security"] = "max-age=31536000"
         if request.url.path == "/static/preview-host.html":
             response.headers["Content-Security-Policy"] = (
                 "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
@@ -115,28 +184,43 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
             )
         return response
 
-    def require_session(cryptobox_session: Annotated[str | None, Cookie()] = None) -> None:
-        if cryptobox_session is None or not secure_compare(cryptobox_session, session_token):
-            raise HTTPException(status_code=401, detail="Open the one-time URL printed by Cryptobox")
+    def require_session(request: Request) -> None:
+        if not auth.valid_session(request.cookies.get(session_cookie)):
+            raise HTTPException(status_code=401, detail="Authentication required")
 
-    def require_csrf(
-        cryptobox_session: Annotated[str | None, Cookie()] = None,
-        cryptobox_csrf: Annotated[str | None, Cookie()] = None,
+    def require_session_or_setup(request: Request) -> None:
+        if not (
+            auth.valid_session(request.cookies.get(session_cookie))
+            or (
+                not runtime.manager.initialized
+                and auth.valid_setup(request.cookies.get(setup_cookie))
+            )
+        ):
+            raise HTTPException(status_code=401, detail="Authentication required")
+
+    def require_public_csrf(
+        request: Request,
         x_cryptobox_csrf: Annotated[str | None, Header()] = None,
     ) -> None:
-        if (
-            cryptobox_session is None
-            or not secure_compare(cryptobox_session, session_token)
-            or
-            cryptobox_csrf is None
-            or x_cryptobox_csrf is None
-            or not secure_compare(cryptobox_csrf, csrf_token)
-            or not secure_compare(x_cryptobox_csrf, csrf_token)
-        ):
+        if not auth.valid_csrf(request.cookies.get(csrf_cookie), x_cryptobox_csrf):
+            LOGGER.warning("security csrf_rejected ip=%s", client_ip(request))
             raise HTTPException(status_code=403, detail="CSRF validation failed")
 
+    def require_csrf(
+        request: Request,
+        x_cryptobox_csrf: Annotated[str | None, Header()] = None,
+    ) -> None:
+        require_session(request)
+        require_public_csrf(request, x_cryptobox_csrf)
+
+    def require_setup_csrf(
+        request: Request,
+        x_cryptobox_csrf: Annotated[str | None, Header()] = None,
+    ) -> None:
+        require_session_or_setup(request)
+        require_public_csrf(request, x_cryptobox_csrf)
+
     def unlocked() -> None:
-        require_session  # keep dependency visible to static checkers
         if not runtime.unlocked:
             raise HTTPException(status_code=423, detail="Vault is locked")
 
@@ -145,36 +229,43 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
         nonlocal bootstrap_used
         if token is not None:
             if bootstrap_used or not secure_compare(token, bootstrap_token):
+                LOGGER.warning("security setup_token_rejected ip=%s", client_ip(request))
                 raise HTTPException(status_code=403, detail="Startup token is invalid or already used")
             bootstrap_used = True
             response = RedirectResponse(url="/", status_code=303)
-            response.set_cookie(
-                "cryptobox_session",
-                session_token,
-                httponly=True,
-                samesite="strict",
-                secure=False,
-                path="/",
-            )
-            response.set_cookie(
-                "cryptobox_csrf", csrf_token, httponly=False, samesite="strict", secure=False, path="/"
-            )
+            if not runtime.manager.initialized:
+                set_setup_cookie(response)
+            if security.legacy_bootstrap_session:
+                set_session_cookie(response)
             return response
         return FileResponse(static_dir / "index.html")
+
+    @app.get("/api/auth/status")
+    async def auth_status(request: Request, response: Response) -> dict[str, object]:
+        csrf = auth.ensure_csrf(request.cookies.get(csrf_cookie))
+        set_cookie(response, csrf_cookie, csrf, httponly=False)
+        return {
+            "initialized": runtime.manager.initialized,
+            "authenticated": auth.valid_session(request.cookies.get(session_cookie)),
+            "setup_authorized": auth.valid_setup(request.cookies.get(setup_cookie)),
+            "csrf": csrf,
+        }
 
     @app.get("/api/version")
     async def app_version() -> dict[str, str]:
         return {"version": __version__}
 
     @app.get("/api/status", dependencies=[Depends(require_session)])
-    async def status() -> dict[str, object]:
+    async def status(request: Request, response: Response) -> dict[str, object]:
+        csrf = auth.ensure_csrf(request.cookies.get(csrf_cookie))
+        set_cookie(response, csrf_cookie, csrf, httponly=False)
         remaining = runtime.ensure_auto_lock(auto_lock_timeout_seconds())
         return {
             "initialized": runtime.manager.initialized,
             "unlocked": runtime.unlocked,
             "root": str(runtime.root),
             "operation": runtime.tracker.snapshot(),
-            "csrf": csrf_token,
+            "csrf": csrf,
             "auto_lock_remaining_seconds": remaining,
         }
 
@@ -218,15 +309,15 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
             "theme": settings.theme,
         }
 
-    @app.get("/api/init/preview", dependencies=[Depends(require_session)])
+    @app.get("/api/init/preview", dependencies=[Depends(require_session_or_setup)])
     async def init_preview() -> dict[str, object]:
         if runtime.manager.initialized:
             raise HTTPException(status_code=409, detail="Vault is already initialized")
         summary = await asyncio.to_thread(preview_root, runtime.root)
         return {"root": str(runtime.root), **summary}
 
-    @app.put("/api/root", dependencies=[Depends(require_csrf)])
-    async def change_root(payload: RootRequest) -> dict[str, object]:
+    @app.put("/api/root", dependencies=[Depends(require_setup_csrf)])
+    async def change_root(payload: RootRequest, response: Response) -> dict[str, object]:
         requested = Path(payload.path).expanduser()
         if not requested.is_absolute():
             raise HTTPException(status_code=400, detail="Root must be an absolute path")
@@ -238,10 +329,18 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
             await runtime.change_root(candidate)
         except UnsafePath as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        clear_session_cookie(response)
+        if security.legacy_bootstrap_session:
+            set_session_cookie(response)
+        if not runtime.manager.initialized:
+            set_setup_cookie(response)
+        else:
+            auth.revoke_setup()
+            clear_setup_cookie(response)
         return {"root": str(runtime.root)}
 
-    @app.post("/api/init", dependencies=[Depends(require_csrf)])
-    async def initialize(payload: InitRequest) -> dict[str, object]:
+    @app.post("/api/init", dependencies=[Depends(require_setup_csrf)])
+    async def initialize(payload: InitRequest, response: Response) -> dict[str, object]:
         if runtime.manager.initialized:
             raise HTTPException(status_code=409, detail="Vault is already initialized")
         if payload.password != payload.password_confirmation:
@@ -254,26 +353,78 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
             runtime.start_scan()
         except CryptoboxError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        set_session_cookie(response)
+        auth.revoke_setup()
+        clear_setup_cookie(response)
+        LOGGER.info("security vault_initialized")
         return {"accepted": True}
 
-    @app.post("/api/unlock", dependencies=[Depends(require_csrf)])
-    async def unlock(payload: UnlockRequest) -> dict[str, object]:
-        if runtime.unlocked:
-            return {"unlocked": True}
+    @app.post("/api/unlock", dependencies=[Depends(require_public_csrf)])
+    async def unlock(
+        payload: UnlockRequest,
+        request: Request,
+        response: Response,
+    ) -> dict[str, object]:
+        remote = client_ip(request)
+        retry = limiter.retry_after(remote)
+        if retry:
+            LOGGER.warning("security login_blocked ip=%s retry_after=%s", remote, retry)
+            raise HTTPException(
+                status_code=429,
+                detail="Too many login attempts",
+                headers={"Retry-After": str(retry)},
+            )
+        if password_check.locked():
+            raise HTTPException(
+                status_code=429,
+                detail="Password verification is busy",
+                headers={"Retry-After": "1"},
+            )
         try:
-            session = await asyncio.to_thread(runtime.manager.unlock, payload.password)
-            runtime.attach_session(session)
-            runtime.reset_auto_lock(auto_lock_timeout_seconds())
-            runtime.start_scan()
+            async with password_check:
+                retry = limiter.retry_after(remote)
+                if retry:
+                    raise HTTPException(
+                        status_code=429,
+                        detail="Too many login attempts",
+                        headers={"Retry-After": str(retry)},
+                    )
+                candidate = await asyncio.to_thread(runtime.manager.unlock, payload.password)
+                if runtime.unlocked:
+                    candidate.close()
+                else:
+                    runtime.attach_session(candidate)
+                    runtime.reset_auto_lock(auto_lock_timeout_seconds())
+                    runtime.start_scan()
         except InvalidPassword as exc:
-            raise HTTPException(status_code=401, detail=str(exc)) from exc
+            retry = limiter.record_failure(remote)
+            LOGGER.warning("security login_failed ip=%s", remote)
+            if retry:
+                raise HTTPException(
+                    status_code=429,
+                    detail="Too many login attempts",
+                    headers={"Retry-After": str(retry)},
+                ) from exc
+            raise HTTPException(status_code=401, detail="Invalid password") from exc
         except CryptoboxError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        limiter.record_success(remote)
+        replacing_session = auth.session_token is not None
+        set_session_cookie(response)
+        clear_setup_cookie(response)
+        LOGGER.info(
+            "security %s ip=%s",
+            "session_replaced" if replacing_session else "login_succeeded",
+            remote,
+        )
         return {"unlocked": True}
 
     @app.post("/api/lock", dependencies=[Depends(require_csrf)])
-    async def lock() -> dict[str, bool]:
+    async def lock(response: Response) -> dict[str, bool]:
         await runtime.lock()
+        clear_session_cookie(response)
+        if security.legacy_bootstrap_session:
+            set_session_cookie(response)
         return {"locked": True}
 
     @app.post("/api/activity", dependencies=[Depends(require_csrf)])
@@ -299,7 +450,7 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
         return {"accepted": True}
 
     @app.post("/api/password", dependencies=[Depends(require_csrf)])
-    async def password(payload: PasswordRequest) -> dict[str, bool]:
+    async def password(payload: PasswordRequest, response: Response) -> dict[str, bool]:
         unlocked()
         if payload.confirmation != payload.new_password:
             raise HTTPException(status_code=400, detail="Passwords do not match")
@@ -308,26 +459,30 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
             await runtime.change_password(payload.new_password)
         except CryptoboxError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        set_session_cookie(response)
         return {"changed": True}
 
     @app.get("/api/tree", dependencies=[Depends(require_session)])
     async def tree(
-        path_id: str = "", offset: int = Query(default=0, ge=0), limit: int = Query(default=500, ge=1, le=1000)
+        path_id: str = "",
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=500, ge=1, le=1000),
+        directories_only: bool = False,
+        sort_by: Literal["name", "modified", "type", "size"] = "name",
+        sort_order: Literal["asc", "desc"] = "asc",
     ) -> dict[str, object]:
         unlocked()
         relative = id_to_relative(path_id)
         directory = safe_join(runtime.root, relative)
         if not directory.is_dir():
             raise HTTPException(status_code=404, detail="Directory not found")
-        entries: list[dict[str, object]] = []
+        all_entries: list[dict[str, object]] = []
         try:
             children = os.scandir(directory)
         except OSError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         assert runtime.index is not None
         executable = current_executable()
-        visible_index = 0
-        has_more = False
         with children:
             for child in children:
                 path = Path(child.path)
@@ -336,8 +491,16 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
                 child_relative = path.relative_to(runtime.root)
                 item: dict[str, object] | None = None
                 if child.is_dir(follow_symlinks=False):
-                    item = {"id": path_to_id(child_relative), "name": display_name(path), "kind": "directory"}
-                elif child.is_file(follow_symlinks=False):
+                    stat_result = path.stat(follow_symlinks=False)
+                    item = {
+                        "id": path_to_id(child_relative),
+                        "name": display_name(path),
+                        "kind": "directory",
+                        "size": None,
+                        "modified": stat_result.st_mtime,
+                        "file_type": "folder",
+                    }
+                elif not directories_only and child.is_file(follow_symlinks=False):
                     # DirEntry.stat() can report zero or otherwise unreliable
                     # device/inode values on Windows.  The scanner records the
                     # full Path.stat() identity in the authenticated index, so
@@ -354,18 +517,40 @@ def create_app(runtime: RuntimeState, bootstrap_token: str) -> FastAPI:
                         "media_type": content_media_type(path.name),
                         "preview_kind": preview_kind(path.name),
                         "encrypted": cached is not None,
+                        "file_type": path.suffix.lower().lstrip(".") or "file",
                     }
                 if item is None:
                     continue
-                if visible_index < offset:
-                    visible_index += 1
-                    continue
-                if len(entries) >= limit:
-                    has_more = True
-                    break
-                entries.append(item)
-                visible_index += 1
-        return {"path_id": path_id, "entries": entries, "next_offset": offset + len(entries), "has_more": has_more}
+                all_entries.append(item)
+
+        def entry_sort_key(item: dict[str, object]) -> tuple[object, str, str]:
+            name = str(item["name"])
+            if sort_by == "modified":
+                primary: object = float(item["modified"])
+            elif sort_by == "type":
+                primary = str(item["file_type"]).casefold()
+            elif sort_by == "size":
+                primary = int(item["size"] or 0)
+            else:
+                primary = name.casefold()
+            return primary, name.casefold(), str(item["id"])
+
+        reverse = sort_order == "desc"
+        directories = [item for item in all_entries if item["kind"] == "directory"]
+        files = [item for item in all_entries if item["kind"] == "file"]
+        directories.sort(key=entry_sort_key, reverse=reverse)
+        files.sort(key=entry_sort_key, reverse=reverse)
+        sorted_entries = directories + files
+        total_entries = len(sorted_entries)
+        entries = sorted_entries[offset : offset + limit]
+        next_offset = min(total_entries, offset + len(entries))
+        return {
+            "path_id": path_id,
+            "entries": entries,
+            "next_offset": next_offset,
+            "has_more": next_offset < total_entries,
+            "total_entries": total_entries,
+        }
 
     def resolve_file(path_id: str) -> tuple[Path, object]:
         if not runtime.session:
