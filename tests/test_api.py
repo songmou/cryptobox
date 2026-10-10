@@ -80,6 +80,24 @@ def test_static_ui_integrates_workspace_actions_into_header_and_settings(tmp_pat
     assert "directories_only=true" in script
     assert "new IntersectionObserver" in script
     assert "directorySortBy" in script
+    assert all(
+        item in html
+        for item in (
+            "contentViewToolbar",
+            "directoryViewSwitcher",
+            "listViewButton",
+            "gridViewButton",
+            "previewCloseButton",
+            "previewPreviousButton",
+            "previewNextButton",
+        )
+    )
+    assert 'const DIRECTORY_VIEW_STORAGE_KEY = "cryptobox.directory-view.v1";' in script
+    assert "function renderDirectoryGrid()" in script
+    assert "function closeFilePreview()" in script
+    assert "async function navigatePreview(direction)" in script
+    assert 'directoryEntries.filter((entry) => entry.kind === "file")' in script
+    assert 'if (state.viewMode === "directory") renderDirectoryList();' in script
     assert 'id="operationProgress" role="progressbar"' in html
 
 

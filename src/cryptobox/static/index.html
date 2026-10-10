@@ -72,7 +72,22 @@
             <div class="progress" id="operationProgress" role="progressbar" aria-label="操作进度" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"><i id="progressBar"></i></div>
             <div id="operationErrors" class="operation-errors"></div>
           </div>
-          <div class="preview empty" id="preview"><div class="empty-state"><span>◇</span><p>从左侧选择文件夹以浏览文件</p></div></div>
+          <div class="content-view-toolbar hidden" id="contentViewToolbar">
+            <div class="directory-view-switcher hidden" id="directoryViewSwitcher" role="group" aria-label="文件展示方式">
+              <button class="view-mode-button" id="listViewButton" type="button" aria-label="列表视图" aria-pressed="true" title="列表视图">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 5h12M4 10h12M4 15h12"/></svg>
+              </button>
+              <button class="view-mode-button" id="gridViewButton" type="button" aria-label="缩略图视图" aria-pressed="false" title="缩略图视图">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3.5" y="3.5" width="5" height="5" rx="1"/><rect x="11.5" y="3.5" width="5" height="5" rx="1"/><rect x="3.5" y="11.5" width="5" height="5" rx="1"/><rect x="11.5" y="11.5" width="5" height="5" rx="1"/></svg>
+              </button>
+            </div>
+            <button class="secondary preview-close-button hidden" id="previewCloseButton" type="button" aria-label="关闭文件预览">关闭预览 <span aria-hidden="true">×</span></button>
+          </div>
+          <div class="preview-frame">
+            <button class="preview-nav preview-nav-previous hidden" id="previewPreviousButton" type="button" aria-label="查看上一个文件" title="上一个文件"><span aria-hidden="true">‹</span></button>
+            <div class="preview empty" id="preview"><div class="empty-state"><span>◇</span><p>从左侧选择文件夹以浏览文件</p></div></div>
+            <button class="preview-nav preview-nav-next hidden" id="previewNextButton" type="button" aria-label="查看下一个文件" title="下一个文件"><span aria-hidden="true">›</span></button>
+          </div>
         </section>
       </section>
 

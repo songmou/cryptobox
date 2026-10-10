@@ -1,4 +1,15 @@
 const $ = (selector) => document.querySelector(selector);
+const DIRECTORY_VIEW_STORAGE_KEY = "cryptobox.directory-view.v1";
+
+function loadDirectoryLayoutPreference() {
+  try {
+    const value = localStorage.getItem(DIRECTORY_VIEW_STORAGE_KEY);
+    return value === "grid" || value === "list" ? value : "list";
+  } catch (_) {
+    return "list";
+  }
+}
+
 const state = {
   csrf: "",
   auth: null,
@@ -16,9 +27,16 @@ const state = {
   directoryRequest: 0,
   directoryController: null,
   directoryObserver: null,
+  directoryThumbnailObserver: null,
+  directoryThumbnailCleanup: [],
   directorySortBy: "name",
   directorySortOrder: "asc",
+  directoryLayout: loadDirectoryLayoutPreference(),
+  directoryReturnScrollTop: 0,
+  directoryReturnFocusId: "",
   viewMode: "empty",
+  previewEntry: null,
+  previewNavigating: false,
   poll: null,
   previewController: null,
   previewCleanup: null,
@@ -76,6 +94,12 @@ function clearActivePreview() {
   state.previewController = null;
   state.previewCleanup = null;
   setMediaPlaying(false);
+}
+
+function clearDirectoryThumbnails() {
+  if (state.directoryThumbnailObserver) state.directoryThumbnailObserver.disconnect();
+  state.directoryThumbnailObserver = null;
+  for (const cleanup of state.directoryThumbnailCleanup.splice(0)) cleanup();
 }
 
 function stopDirectoryLoading() {
@@ -155,6 +179,65 @@ function contentUrl(entry) {
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
+}
+
+function updateDirectoryLayoutControls() {
+  const isList = state.directoryLayout === "list";
+  $("#listViewButton").setAttribute("aria-pressed", String(isList));
+  $("#gridViewButton").setAttribute("aria-pressed", String(!isList));
+}
+
+function setDirectoryLayout(layout) {
+  if (!new Set(["list", "grid"]).has(layout) || state.directoryLayout === layout) return;
+  state.directoryReturnScrollTop = $("#preview").scrollTop;
+  state.directoryLayout = layout;
+  try { localStorage.setItem(DIRECTORY_VIEW_STORAGE_KEY, layout); } catch (_) {}
+  updateDirectoryLayoutControls();
+  if (state.viewMode === "directory") {
+    renderDirectoryList();
+    requestAnimationFrame(() => { $("#preview").scrollTop = state.directoryReturnScrollTop; });
+  }
+}
+
+function directoryFiles() {
+  return state.directoryEntries.filter((entry) => entry.kind === "file");
+}
+
+function updatePreviewNavigationControls() {
+  const active = state.viewMode === "file" && Boolean(state.previewEntry);
+  const previous = $("#previewPreviousButton");
+  const next = $("#previewNextButton");
+  previous.classList.toggle("hidden", !active);
+  next.classList.toggle("hidden", !active);
+  if (!active) return;
+  const files = directoryFiles();
+  const index = files.findIndex((entry) => entry.id === state.previewEntry.id);
+  previous.disabled = state.previewNavigating || index <= 0;
+  next.disabled = state.previewNavigating || index < 0 || (index >= files.length - 1 && !state.directoryHasMore);
+}
+
+function updateContentControls() {
+  const directoryMode = state.viewMode === "directory";
+  const fileMode = state.viewMode === "file";
+  $("#contentViewToolbar").classList.toggle("hidden", !directoryMode && !fileMode);
+  $("#directoryViewSwitcher").classList.toggle("hidden", !directoryMode);
+  $("#previewCloseButton").classList.toggle("hidden", !fileMode);
+  updateDirectoryLayoutControls();
+  updatePreviewNavigationControls();
+}
+
+function captureDirectoryReturnState(entryId) {
+  state.directoryReturnScrollTop = $("#preview").scrollTop;
+  state.directoryReturnFocusId = entryId;
+}
+
+function restoreDirectoryReturnState() {
+  const target = $("#preview");
+  target.scrollTop = state.directoryReturnScrollTop;
+  if (!state.directoryReturnFocusId) return;
+  const item = [...target.querySelectorAll("[data-id]")]
+    .find((candidate) => candidate.dataset.id === state.directoryReturnFocusId);
+  item?.focus({ preventScroll: true });
 }
 
 function showMediaPreview(entry, kind) {
@@ -723,12 +806,69 @@ function sortLabel(sortBy) {
   return { name: "名称", modified: "修改时间", type: "类型", size: "大小" }[sortBy];
 }
 
-function renderDirectoryList() {
+function openDirectoryEntry(entry) {
+  if (entry.kind === "directory") {
+    enterDirectoryFromList(entry);
+    return;
+  }
+  captureDirectoryReturnState(entry.id);
+  previewFile(entry);
+}
+
+function prepareDirectoryTarget() {
   const target = $("#preview");
   if (state.directoryObserver) state.directoryObserver.disconnect();
   state.directoryObserver = null;
+  clearDirectoryThumbnails();
   target.classList.remove("empty");
   target.classList.add("directory-mode");
+  return target;
+}
+
+function createDirectoryStatus() {
+  const status = document.createElement("div");
+  status.className = "directory-list-status";
+  if (state.directoryError) {
+    status.classList.add("error-text");
+    status.textContent = `加载失败：${state.directoryError}`;
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "secondary";
+    retry.textContent = "重试";
+    retry.addEventListener("click", () => loadDirectoryEntries(Boolean(state.directoryEntries.length)));
+    status.appendChild(retry);
+  } else if (state.directoryLoading && !state.directoryEntries.length) {
+    status.textContent = "正在加载文件列表…";
+  } else if (!state.directoryEntries.length) {
+    status.textContent = "此文件夹为空";
+  } else if (state.directoryLoading) {
+    status.textContent = `正在加载更多… 已显示 ${state.directoryEntries.length} / ${state.directoryTotal}`;
+  } else if (state.directoryHasMore) {
+    status.textContent = `已显示 ${state.directoryEntries.length} / ${state.directoryTotal}`;
+  } else {
+    status.textContent = `已显示全部 ${state.directoryTotal} 项`;
+  }
+  return status;
+}
+
+function finishDirectoryRender(target, shell) {
+  shell.appendChild(createDirectoryStatus());
+  const sentinel = document.createElement("div");
+  sentinel.className = "directory-list-sentinel";
+  sentinel.setAttribute("aria-hidden", "true");
+  shell.appendChild(sentinel);
+  target.replaceChildren(shell);
+
+  if (state.directoryHasMore && !state.directoryLoading && !state.directoryError) {
+    state.directoryObserver = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) loadDirectoryEntries(true);
+    }, { root: target, rootMargin: "240px 0px" });
+    state.directoryObserver.observe(sentinel);
+  }
+}
+
+function renderDirectoryTable() {
+  const target = prepareDirectoryTarget();
 
   const shell = document.createElement("section");
   shell.className = "directory-list-shell";
@@ -767,7 +907,7 @@ function renderDirectoryList() {
       <div role="cell">${escapeHtml(formatModified(entry.modified))}</div>
       <div role="cell">${escapeHtml(formatFileType(entry))}</div>
       <div role="cell">${entry.kind === "file" ? escapeHtml(formatBytes(entry.size)) : "—"}</div>`;
-    const open = () => entry.kind === "directory" ? enterDirectoryFromList(entry) : previewFile(entry);
+    const open = () => openDirectoryEntry(entry);
     row.addEventListener("click", open);
     row.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); }
@@ -775,43 +915,138 @@ function renderDirectoryList() {
     table.appendChild(row);
   }
   shell.appendChild(table);
+  finishDirectoryRender(target, shell);
+}
 
-  const status = document.createElement("div");
-  status.className = "directory-list-status";
-  if (state.directoryError) {
-    status.classList.add("error-text");
-    status.textContent = `加载失败：${state.directoryError}`;
-    const retry = document.createElement("button");
-    retry.type = "button";
-    retry.className = "secondary";
-    retry.textContent = "重试";
-    retry.addEventListener("click", () => loadDirectoryEntries(Boolean(state.directoryEntries.length)));
-    status.appendChild(retry);
-  } else if (state.directoryLoading && !state.directoryEntries.length) {
-    status.textContent = "正在加载文件列表…";
-  } else if (!state.directoryEntries.length) {
-    status.textContent = "此文件夹为空";
-  } else if (state.directoryLoading) {
-    status.textContent = `正在加载更多… 已显示 ${state.directoryEntries.length} / ${state.directoryTotal}`;
-  } else if (state.directoryHasMore) {
-    status.textContent = `已显示 ${state.directoryEntries.length} / ${state.directoryTotal}`;
-  } else {
-    status.textContent = `已显示全部 ${state.directoryTotal} 项`;
+function installThumbnail(container, entry) {
+  if (entry.kind !== "file" || !entry.encrypted || !["image", "svg", "video"].includes(entry.preview_kind)) return;
+  let cancelled = false;
+  let objectUrl = "";
+  let controller = null;
+  let media = null;
+
+  const reveal = () => {
+    if (!cancelled) container.classList.add("thumbnail-ready");
+  };
+  const fail = () => {
+    if (!cancelled) container.classList.add("thumbnail-failed");
+  };
+  const load = async () => {
+    if (media || cancelled) return;
+    if (entry.preview_kind === "video") {
+      media = document.createElement("video");
+      media.muted = true;
+      media.preload = "metadata";
+      media.playsInline = true;
+      media.tabIndex = -1;
+      media.setAttribute("aria-hidden", "true");
+      media.addEventListener("loadedmetadata", () => {
+        try { media.currentTime = Math.min(0.1, Math.max(0, Number(media.duration || 0) / 2)); }
+        catch (_) { reveal(); }
+      }, { once: true });
+      media.addEventListener("loadeddata", reveal, { once: true });
+      media.addEventListener("seeked", reveal, { once: true });
+      media.addEventListener("error", fail, { once: true });
+      container.appendChild(media);
+      media.src = contentUrl(entry);
+      return;
+    }
+
+    media = document.createElement("img");
+    media.alt = "";
+    media.decoding = "async";
+    media.addEventListener("load", reveal, { once: true });
+    media.addEventListener("error", fail, { once: true });
+    container.appendChild(media);
+    if (entry.preview_kind === "image") {
+      media.src = contentUrl(entry);
+      return;
+    }
+    if (entry.size > TEXT_PREVIEW_LIMIT) { fail(); return; }
+    controller = new AbortController();
+    try {
+      const response = await fetch(contentUrl(entry), { credentials: "same-origin", signal: controller.signal });
+      if (!response.ok) throw new Error(String(response.status));
+      const buffer = await response.arrayBuffer();
+      if (cancelled) return;
+      objectUrl = URL.createObjectURL(new Blob([buffer], { type: "image/svg+xml" }));
+      media.src = objectUrl;
+    } catch (error) {
+      if (error.name !== "AbortError") fail();
+    }
+  };
+
+  container._loadThumbnail = load;
+  state.directoryThumbnailCleanup.push(() => {
+    cancelled = true;
+    controller?.abort();
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    if (media?.tagName === "VIDEO") {
+      media.pause();
+      media.removeAttribute("src");
+      media.load();
+    } else media?.removeAttribute("src");
+  });
+}
+
+function renderDirectoryGrid() {
+  const target = prepareDirectoryTarget();
+  const shell = document.createElement("section");
+  shell.className = "directory-grid-shell";
+  shell.setAttribute("aria-label", `${directoryDisplayName(state.selectedDirectory)}的内容`);
+  const grid = document.createElement("div");
+  grid.className = "directory-grid";
+  grid.setAttribute("role", "list");
+
+  for (const entry of state.directoryEntries) {
+    const item = document.createElement("div");
+    item.className = "directory-grid-item";
+    item.setAttribute("role", "listitem");
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = `directory-card${entry.kind === "file" && !entry.encrypted ? " unencrypted" : ""}`;
+    card.dataset.id = entry.id;
+    card.setAttribute("aria-label", `${entry.kind === "directory" ? "打开文件夹" : "预览文件"} ${entry.name}`);
+    const thumb = document.createElement("span");
+    thumb.className = "directory-thumbnail";
+    thumb.innerHTML = `<span class="directory-thumbnail-icon file-icon" aria-hidden="true">${fileIcon(entry)}</span>`;
+    installThumbnail(thumb, entry);
+    const name = document.createElement("span");
+    name.className = "directory-card-name";
+    name.textContent = entry.name;
+    const meta = document.createElement("span");
+    meta.className = "directory-card-meta";
+    meta.textContent = entry.kind === "file" ? `${formatFileType(entry)} · ${formatBytes(entry.size)}` : "文件夹";
+    card.append(thumb, name, meta);
+    if (entry.kind === "file" && !entry.encrypted) {
+      const status = document.createElement("span");
+      status.className = "file-status plain";
+      status.textContent = "未加密";
+      card.appendChild(status);
+    }
+    card.addEventListener("click", () => openDirectoryEntry(entry));
+    item.appendChild(card);
+    grid.appendChild(item);
   }
-  shell.appendChild(status);
+  shell.appendChild(grid);
+  finishDirectoryRender(target, shell);
 
-  const sentinel = document.createElement("div");
-  sentinel.className = "directory-list-sentinel";
-  sentinel.setAttribute("aria-hidden", "true");
-  shell.appendChild(sentinel);
-  target.replaceChildren(shell);
-
-  if (state.directoryHasMore && !state.directoryLoading && !state.directoryError) {
-    state.directoryObserver = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) loadDirectoryEntries(true);
-    }, { root: target, rootMargin: "240px 0px" });
-    state.directoryObserver.observe(sentinel);
+  state.directoryThumbnailObserver = new IntersectionObserver((entries) => {
+    for (const observed of entries) {
+      if (!observed.isIntersecting) continue;
+      state.directoryThumbnailObserver?.unobserve(observed.target);
+      observed.target._loadThumbnail?.();
+    }
+  }, { root: target, rootMargin: "160px 0px" });
+  for (const thumbnail of grid.querySelectorAll(".directory-thumbnail")) {
+    if (thumbnail._loadThumbnail) state.directoryThumbnailObserver.observe(thumbnail);
   }
+}
+
+function renderDirectoryList() {
+  if (state.directoryLayout === "grid") renderDirectoryGrid();
+  else renderDirectoryTable();
+  updateContentControls();
 }
 
 async function loadDirectoryEntries(append = false) {
@@ -834,7 +1069,7 @@ async function loadDirectoryEntries(append = false) {
   const sortOrder = state.directorySortOrder;
   const offset = append ? state.directoryOffset : 0;
   state.directoryController = new AbortController();
-  renderDirectoryList();
+  if (state.viewMode === "directory") renderDirectoryList();
   try {
     const query = new URLSearchParams({
       path_id: pathId,
@@ -859,6 +1094,7 @@ async function loadDirectoryEntries(append = false) {
       state.directoryLoading = false;
       state.directoryController = null;
       if (state.viewMode === "directory") renderDirectoryList();
+      else updatePreviewNavigationControls();
     }
   }
 }
@@ -871,12 +1107,18 @@ async function changeDirectorySort(sortBy) {
 
 async function selectDirectory(id) {
   clearActivePreview();
+  clearDirectoryThumbnails();
   stopDirectoryLoading();
   state.selected = null;
+  state.previewEntry = null;
+  state.previewNavigating = false;
   state.selectedDirectory = id;
   state.viewMode = "directory";
+  state.directoryReturnScrollTop = 0;
+  state.directoryReturnFocusId = "";
   $("#downloadButton").disabled = true;
   $("#previewTitle").textContent = directoryDisplayName(id);
+  updateContentControls();
   renderTree();
   closeDrawerOnMobile();
   await loadDirectoryEntries(false);
@@ -951,9 +1193,9 @@ async function refreshTreePreservingExpansion() {
     await selectDirectory(state.selectedDirectory);
   } else if (state.viewMode === "directory") {
     await loadDirectoryEntries(false);
-  } else if (state.selected) {
+  } else if (state.previewEntry) {
     try {
-      const response = await fetch(contentUrl(state.selected), { method: "HEAD", credentials: "same-origin" });
+      const response = await fetch(contentUrl(state.previewEntry), { method: "HEAD", credentials: "same-origin" });
       if (!response.ok) {
         toast("此前选择的文件已不存在或已发生变化。");
         await selectDirectory(state.selectedDirectory);
@@ -969,12 +1211,16 @@ async function refreshTreePreservingExpansion() {
 
 async function previewFile(entry) {
   clearActivePreview();
+  clearDirectoryThumbnails();
   stopDirectoryLoading();
   state.viewMode = "file";
+  state.previewEntry = entry;
+  state.directoryReturnFocusId = entry.id;
   state.selected = entry.encrypted ? entry : null;
   $("#previewTitle").textContent = entry.name;
   $("#downloadButton").disabled = !entry.encrypted;
   $("#preview").classList.remove("empty", "directory-mode");
+  updateContentControls();
   renderTree();
   if (!entry.encrypted) {
     previewMessage("此文件尚未加密或加密未成功，完成重新扫描前不能预览或下载。", "!", "preview-warning");
@@ -997,10 +1243,56 @@ async function previewFile(entry) {
   }
 }
 
+function closeFilePreview() {
+  if (state.viewMode !== "file") return;
+  clearActivePreview();
+  state.selected = null;
+  state.previewEntry = null;
+  state.previewNavigating = false;
+  state.viewMode = "directory";
+  $("#downloadButton").disabled = true;
+  $("#previewTitle").textContent = directoryDisplayName(state.selectedDirectory);
+  renderDirectoryList();
+  updateContentControls();
+  requestAnimationFrame(restoreDirectoryReturnState);
+}
+
+async function navigatePreview(direction) {
+  if (state.viewMode !== "file" || !state.previewEntry || state.previewNavigating) return;
+  const currentId = state.previewEntry.id;
+  const findTarget = () => {
+    const files = directoryFiles();
+    const index = files.findIndex((entry) => entry.id === currentId);
+    return index < 0 ? null : files[index + direction] || null;
+  };
+  let target = findTarget();
+  if (!target && direction > 0 && state.directoryHasMore) {
+    state.previewNavigating = true;
+    updatePreviewNavigationControls();
+    while (!target && state.directoryHasMore) {
+      const previousOffset = state.directoryOffset;
+      await loadDirectoryEntries(true);
+      if (state.directoryError) break;
+      if (state.directoryOffset === previousOffset) break;
+      target = findTarget();
+    }
+    state.previewNavigating = false;
+    updatePreviewNavigationControls();
+    if (!target && state.directoryError) {
+      toast(`无法加载下一个文件：${state.directoryError}`);
+      return;
+    }
+  }
+  if (target) await previewFile(target);
+}
+
 function resetWorkspace() {
   clearActivePreview();
+  clearDirectoryThumbnails();
   stopDirectoryLoading();
   state.selected = null;
+  state.previewEntry = null;
+  state.previewNavigating = false;
   state.selectedDirectory = "";
   state.treeNodes.clear();
   state.directoryEntries = [];
@@ -1008,12 +1300,15 @@ function resetWorkspace() {
   state.directoryHasMore = false;
   state.directoryTotal = 0;
   state.directoryError = "";
+  state.directoryReturnScrollTop = 0;
+  state.directoryReturnFocusId = "";
   state.viewMode = "empty";
   state.operationFinishedAt = null;
   $("#downloadButton").disabled = true;
   $("#previewTitle").textContent = "选择文件夹";
   $("#preview").classList.remove("directory-mode");
   previewMessage("从左侧选择文件夹以浏览文件", "◇");
+  updateContentControls();
   $("#fileTree").replaceChildren();
 }
 
@@ -1188,6 +1483,11 @@ $("#shutdownButton").addEventListener("click", async () => {
   }
 });
 $("#downloadButton").addEventListener("click", () => { if (state.selected) window.location.href = `/api/download/${encodeURIComponent(state.selected.id)}`; });
+$("#listViewButton").addEventListener("click", () => setDirectoryLayout("list"));
+$("#gridViewButton").addEventListener("click", () => setDirectoryLayout("grid"));
+$("#previewCloseButton").addEventListener("click", closeFilePreview);
+$("#previewPreviousButton").addEventListener("click", () => navigatePreview(-1));
+$("#previewNextButton").addEventListener("click", () => navigatePreview(1));
 $("#exportFolderButton").addEventListener("click", async () => {
   try {
     const result = await api("/api/export-ticket", { method: "POST", body: { ids: [state.selectedDirectory] } });
@@ -1234,7 +1534,10 @@ $("#drawerButton").addEventListener("click", openDrawer);
 $("#drawerCloseButton").addEventListener("click", closeDrawer);
 $("#drawerScrim").addEventListener("click", closeDrawer);
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") { closeDrawer(); closeSettings(); }
+  if (event.key !== "Escape") return;
+  if (!$("#modalBackdrop").classList.contains("hidden")) closeSettings();
+  else if (state.drawerOpen) closeDrawer();
+  else closeFilePreview();
 });
 
 const systemTheme = matchMedia("(prefers-color-scheme: light)");
@@ -1254,5 +1557,6 @@ async function loadVersion() {
 }
 
 applyTheme("system");
+updateDirectoryLayoutControls();
 refreshAccess().then(loadSettings);
 loadVersion();
